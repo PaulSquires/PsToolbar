@@ -206,6 +206,41 @@ function PsToolbar_ControlNotifyCallback( byval m as PSTOOLBAR_CONTROLNOTIFY ptr
 end function
 
 
+' ========================================================================================
+' ENTER / ESCAPE in the search box.
+'
+' A KEYSTROKE IS NOT A NOTIFICATION, so this does NOT arrive through the control-notify
+' callback: keys go to the FOCUSED window, and a message merely destined for a child never
+' passes through the toolbar at all. It has to be caught in the message pump, and the
+' placement there is the whole difficulty -- see the pump below.
+'
+' Returns TRUE when the key was consumed, so the pump can stop processing it.
+' ========================================================================================
+function frmMain_HandleSearchKey( byval pMsg as MSG ptr ) as boolean
+    if pMsg = 0 then return false
+    if pMsg->message <> WM_KEYDOWN then return false
+    if pMsg->hwnd <> HWND_SEARCHBOX then return false
+
+    select case pMsg->wParam
+    case VK_RETURN
+        ' Straight into a `dim as string` first (the family's tracing rule).
+        dim as string sText = AfxGetWindowText( HWND_SEARCHBOX )
+        dim as string s = "search: ENTER pressed, term='" & sText & "'"
+        print s
+        ' Consumed. Without this a single-line EDIT beeps at the unhandled return, and
+        ' IsDialogMessage turns the key into an IDOK command for the form.
+        return true
+
+    case VK_ESCAPE
+        SetWindowTextW( HWND_SEARCHBOX, "" )
+        print "search: ESCAPE pressed, box cleared"
+        return true
+    end select
+
+    return false
+end function
+
+
 ' A dropdown menu's own commands come back through PsPopupMenu's select callback, NOT
 ' through the toolbar -- the toolbar registers itself as the notify window so it can track
 ' open/close state, and leaves the command door to the host.
@@ -466,6 +501,16 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
         SetFocus( HWND_SEARCHBOX )
     end if
 
+    ' Drives ENTER through the REAL pump: focus the box, put a term in it, and queue the
+    ' keystroke. GetMessage below retrieves it with hwnd = the EDIT, exactly as a real key
+    ' press would arrive.
+    if environ("PSTOOLBAR_DEMO_ENTER") = "1" then
+        SetFocus( HWND_SEARCHBOX )
+        SetWindowTextW( HWND_SEARCHBOX, "widget" )
+        PostMessageW( HWND_SEARCHBOX, WM_KEYDOWN, VK_RETURN, 0 )
+        PostMessageW( HWND_SEARCHBOX, WM_KEYDOWN, VK_ESCAPE, 0 )
+    end if
+
     if environ("PSTOOLBAR_DEMO_DROPDOWN") = "1" then
         PsToolbar_DropDown( HWND_TOOLBAR_MAIN, PsToolbar_FindItemByID( HWND_TOOLBAR_MAIN, IDM_RUN ) )
     end if
@@ -480,6 +525,18 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
         ' chevron that opened it.
         if PsToolbar_FilterMessage( HWND_TOOLBAR_MAIN, @uMsg ) then continue do
         if PsToolbar_FilterMessage( HWND_TOOLBAR_CUSTOM, @uMsg ) then continue do
+
+        ' Keys aimed at a CONTROL cell's child. THE POSITION OF THIS TEST IS THE WHOLE
+        ' DIFFICULTY, and it is bounded on both sides:
+        '
+        '   AFTER PsToolbar_FilterMessage, so that while a dropdown is open ENTER commits the
+        '   highlighted menu row instead of running the search -- the menu owns the keyboard
+        '   for as long as it is up.
+        '
+        '   BEFORE IsDialogMessage, which turns VK_RETURN into an IDOK command for the form
+        '   and VK_ESCAPE into IDCANCEL. Put this after it and the keys never arrive -- the
+        '   same trap that silently swallowed Escape in a real dialog once already.
+        if frmMain_HandleSearchKey( @uMsg ) then continue do
 
         if (pWindow->AccelHandle = 0) orelse (TranslateAccelerator(pWindow->hWindow, pWindow->AccelHandle, @uMsg) = 0) then
             if IsDialogMessage(pWindow->hWindow, @uMsg) = 0 then

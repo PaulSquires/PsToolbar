@@ -285,6 +285,39 @@ Return TRUE to claim a message, and set `m->lResult` first if it needs a return 
 positions your child and never themes it, so an unclaimed `WM_CTLCOLOR*` behaves exactly as
 it would have without the toolbar.
 
+### Keyboard in a CONTROL cell
+
+**Keystrokes do not arrive through the notify callback**, and cannot: a key goes to the
+*focused* window, so a message merely destined for your child never passes through the toolbar
+at all. Enter, Escape and Tab in an embedded edit are handled in your **message pump**, and
+where you put the test is the whole difficulty:
+
+```freebasic
+do while GetMessage( @uMsg, null, 0, 0 )
+    ' 1. The toolbar first, so that while a dropdown is open ENTER commits the highlighted
+    '    menu row instead of reaching your control.
+    if PsToolbar_FilterMessage( hToolbar, @uMsg ) then continue do
+
+    ' 2. Your child's keys next -- BEFORE IsDialogMessage.
+    if uMsg.message = WM_KEYDOWN andalso uMsg.hwnd = ghSearchBox then
+        select case uMsg.wParam
+        case VK_RETURN : RunSearch() : continue do
+        case VK_ESCAPE : SetWindowTextW( ghSearchBox, "" ) : continue do
+        end select
+    end if
+
+    ' 3. Everything else.
+    if IsDialogMessage( hMain, @uMsg ) = 0 then
+        TranslateMessage @uMsg
+        DispatchMessage  @uMsg
+    end if
+loop
+```
+
+Put step 2 **after** `IsDialogMessage` and the keys never arrive: that call turns `VK_RETURN`
+into an `IDOK` command for the form and `VK_ESCAPE` into `IDCANCEL`. Consuming the key with
+`continue do` also stops a single-line `EDIT` beeping at an unhandled return.
+
 ## Behaviour and limits
 
 - **Horizontal only.** There is no vertical orientation.
