@@ -444,6 +444,13 @@ type PSTOOLBAR
     bNeedOverflow      as boolean = false
     rcOverflow         as RECT            ' the overflow button's cell; EMPTY when not needed
     hOverflowMenu      as HWND = 0        ' created on demand, destroyed with the control
+    ' PSPOPUPMENU_COLORS carries NO defaults except SeparatorColor, so a menu that is never
+    ' given colors renders BLACK ON BLACK. Every menu this control creates is therefore themed
+    ' from the bar's own palette at creation, and re-themed by PsToolbar_SetColors -- which is
+    ' also what makes theming the bar theme its menus for free.
+    ' PsToolbar_SetMenuColors sets this flag and the derivation stops.
+    bMenuColorsCustom  as boolean = false
+    menuColors         as PSPOPUPMENU_COLORS   ' only meaningful when bMenuColorsCustom
     bLayoutDirty       as boolean = true
     PaintItemCallback  as TBR_PaintItemCallbackSub    ' optional; replaces the built-in painter
     MessageCallback    as TBR_MessageCallbackFunc     ' optional
@@ -1401,6 +1408,10 @@ declare sub      PsToolbar_SetGlyphs( byval hToolbar as HWND, byval wszChevron a
 ' ----------------------------------------------------------------------------------------
 declare function PsToolbar_GetItemMenu( byval hToolbar as HWND, byval idx as long ) as HWND
 declare function PsToolbar_GetOverflowMenu( byval hToolbar as HWND ) as HWND
+' Claims the colors of EVERY menu this toolbar owns, present and future: from here on
+' PsToolbar_SetColors will not re-derive them, so an explicit choice is never overwritten by a
+' later theme change. Without this call the menus follow the bar's own palette.
+declare sub      PsToolbar_SetMenuColors( byval hToolbar as HWND, byval pColors as PSPOPUPMENU_COLORS ptr )
 declare function PsToolbar_IsDroppedDown( byval hToolbar as HWND ) as boolean
 declare function PsToolbar_GetDroppedItem( byval hToolbar as HWND ) as long
 declare function PsToolbar_DropDown( byval hToolbar as HWND, byval idx as long ) as boolean

@@ -421,6 +421,13 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
     UpdateWindow( pWindow->hWindow )
     ShowWindow( pWindow->hWindow, SW_SHOW )
 
+    ' Screenshot hook: opens the Run split button's menu so a capture can show a dropdown
+    ' without synthetic mouse input. Deterministic, and it exercises the programmatic
+    ' DropDown path at the same time.
+    if environ("PSTOOLBAR_DEMO_DROPDOWN") = "1" then
+        PsToolbar_DropDown( HWND_TOOLBAR_MAIN, PsToolbar_FindItemByID( HWND_TOOLBAR_MAIN, IDM_RUN ) )
+    end if
+
     dim uMsg as MSG
 
     do while GetMessage(@uMsg, null, 0, 0)

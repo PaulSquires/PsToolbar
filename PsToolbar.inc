@@ -241,6 +241,52 @@ end sub
 ' SetSelectCallback -- do NOT call PsPopupMenu_SetNotifyWindow on a toolbar-owned menu, as
 ' that would displace the toolbar's own registration and leave its dropped state stuck on.
 ' ========================================================================================
+' ========================================================================================
+' Re-derive a menu's colors from the bar's, unless the host has claimed them.
+'
+' PSPOPUPMENU_COLORS carries no defaults except SeparatorColor, so a menu that is never given
+' colors renders BLACK ON BLACK -- the separator rule being the only thing visible on it. This
+' is what stops that being the out-of-box experience, and it is why theming the bar themes its
+' menus: a host sets PSTOOLBAR_COLORS once.
+'
+' BorderColor is taken from ForeColorDisabled rather than SeparatorColor: the border has to
+' delimit the popup against whatever is BEHIND it, which may be a light host window, and the
+' mid grey reads against both. SeparatorColor is a chrome line on the bar itself and is often
+' close to the bar background.
+' ========================================================================================
+private sub PsToolbar_ApplyDerivedMenuColors( byval pTB as PSTOOLBAR ptr, byval hMenu as HWND )
+    if pTB = null then exit sub
+    if hMenu = 0 then exit sub
+    if IsWindow( hMenu ) = 0 then exit sub
+    ' A host that claimed the colors gets them applied here too, so a menu created LATER
+    ' still comes up right rather than falling back to the black default.
+    if pTB->bMenuColorsCustom then
+        PsPopupMenu_SetColors( hMenu, @pTB->menuColors )
+        exit sub
+    end if
+
+    dim as PSPOPUPMENU_COLORS c
+    c.BackColor         = pTB->colors.BackColor
+    c.ForeColor         = pTB->colors.ForeColor
+    c.BackColorHot      = pTB->colors.BackColorHot
+    c.ForeColorHot      = pTB->colors.ForeColorHot
+    c.ForeColorDisabled = pTB->colors.ForeColorDisabled
+    c.BorderColor       = pTB->colors.ForeColorDisabled
+    c.SeparatorColor    = pTB->colors.SeparatorColor
+    PsPopupMenu_SetColors( hMenu, @c )
+end sub
+
+
+' Apply the derivation to every menu this toolbar owns. Called when the bar is re-themed.
+private sub PsToolbar_ReapplyAllMenuColors( byval pTB as PSTOOLBAR ptr )
+    if pTB = null then exit sub
+    if pTB->hOverflowMenu <> 0 then PsToolbar_ApplyDerivedMenuColors( pTB, pTB->hOverflowMenu )
+    for i as long = 0 to pTB->itemCount - 1
+        if pTB->items(i).hMenu <> 0 then PsToolbar_ApplyDerivedMenuColors( pTB, pTB->items(i).hMenu )
+    next
+end sub
+
+
 private function PsToolbar_EnsureItemMenu( _
             byval pTB as PSTOOLBAR ptr, _
             byval hToolbar as HWND, _
@@ -259,6 +305,7 @@ private function PsToolbar_EnsureItemMenu( _
     PsPopupMenu_SetNotifyWindow( hM, hToolbar )
     PsPopupMenu_SetFonts( hM, pTB->hTextFont, pTB->hGlyphFont )
     pItem->hMenu = hM
+    PsToolbar_ApplyDerivedMenuColors( pTB, hM )
     return hM
 end function
 
@@ -278,6 +325,7 @@ private function PsToolbar_EnsureOverflowMenu( _
     PsPopupMenu_SetNotifyWindow( hM, hToolbar )
     PsPopupMenu_SetFonts( hM, pTB->hTextFont, pTB->hGlyphFont )
     pTB->hOverflowMenu = hM
+    PsToolbar_ApplyDerivedMenuColors( pTB, hM )
     return hM
 end function
 
@@ -1814,6 +1862,8 @@ sub PsToolbar_SetColors( byval hToolbar as HWND, byval pColors as PSTOOLBAR_COLO
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
     if pTB = null then exit sub
     pTB->colors = *pColors
+    ' Theming the bar themes its menus for free -- unless the host claimed them.
+    PsToolbar_ReapplyAllMenuColors( pTB )
     if pTB->hWin then InvalidateRect( pTB->hWin, NULL, TRUE )
 end sub
 
@@ -1909,6 +1959,24 @@ function PsToolbar_GetOverflowMenu( byval hToolbar as HWND ) as HWND
     if pTB = null then return 0
     return PsToolbar_EnsureOverflowMenu( pTB, hToolbar )
 end function
+
+sub PsToolbar_SetMenuColors( byval hToolbar as HWND, byval pColors as PSPOPUPMENU_COLORS ptr )
+    if pColors = 0 then exit sub
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = null then exit sub
+    ' Claimed permanently, and applied to every menu that already exists.
+    pTB->bMenuColorsCustom = true
+    pTB->menuColors        = *pColors
+    if pTB->hOverflowMenu <> 0 then
+        if IsWindow( pTB->hOverflowMenu ) then PsPopupMenu_SetColors( pTB->hOverflowMenu, pColors )
+    end if
+    for i as long = 0 to pTB->itemCount - 1
+        if pTB->items(i).hMenu <> 0 then
+            if IsWindow( pTB->items(i).hMenu ) then PsPopupMenu_SetColors( pTB->items(i).hMenu, pColors )
+        end if
+    next
+end sub
+
 
 function PsToolbar_IsDroppedDown( byval hToolbar as HWND ) as boolean
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
@@ -3119,6 +3187,67 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
 
         TBRTest_Check( "menu: nothing is dropped to begin with", _
                        (PsToolbar_IsDroppedDown(h) = false), "IsDroppedDown=false" )
+
+        ' ---- a menu is THEMED FROM THE BAR, not left black -----------------------------
+        ' PSPOPUPMENU_COLORS carries no defaults except SeparatorColor, so a menu that is
+        ' never given colors renders black on black -- the separator rule being the only
+        ' thing visible on it. Read the colors back off the popup itself: asserting that the
+        ' derivation function ran would only be testing the test.
+        dim as PSPOPUPMENU ptr pPM = GetPopupMenuPointer( hM1 )
+        dim as PSTOOLBAR_COLORS tc
+        PsToolbar_GetColors( h, @tc )
+        if pPM = 0 then
+            TBRTest_Check( "menu: a new menu is themed from the bar's palette", false, "no popup pointer" )
+        else
+            sD = "menu.Back=&h" & hex(pPM->colors.BackColor) & " bar.Back=&h" & hex(tc.BackColor) & _
+                 "  menu.Fore=&h" & hex(pPM->colors.ForeColor) & " bar.Fore=&h" & hex(tc.ForeColor)
+            TBRTest_Check( "menu: a new menu is themed from the bar's palette", _
+                           (pPM->colors.BackColor = tc.BackColor) andalso _
+                           (pPM->colors.ForeColor = tc.ForeColor), sD )
+
+            ' The failure mode this guards is specifically BLACK-ON-BLACK, so assert the two
+            ' are not merely equal to each other but actually distinguishable.
+            sD = "back=&h" & hex(pPM->colors.BackColor) & " fore=&h" & hex(pPM->colors.ForeColor)
+            TBRTest_Check( "menu: its background and foreground are not both black", _
+                           (pPM->colors.BackColor <> pPM->colors.ForeColor), sD )
+
+            ' Re-theming the BAR re-themes the menu -- a host sets one palette.
+            dim as PSTOOLBAR_COLORS tc2 = tc
+            tc2.BackColor = BGR(1,2,3)
+            PsToolbar_SetColors( h, @tc2 )
+            sD = "after SetColors, menu.Back=&h" & hex(pPM->colors.BackColor) & " expect=&h" & hex(BGR(1,2,3))
+            TBRTest_Check( "menu: re-theming the bar re-themes its menus", _
+                           (pPM->colors.BackColor = BGR(1,2,3)), sD )
+
+            ' ...unless the host CLAIMED them, after which a bar re-theme must not touch them.
+            dim as PSPOPUPMENU_COLORS mc
+            mc.BackColor = BGR(9,9,9)
+            mc.ForeColor = BGR(200,200,200)
+            PsToolbar_SetMenuColors( h, @mc )
+            dim as PSTOOLBAR_COLORS tc3 = tc
+            tc3.BackColor = BGR(4,5,6)
+            PsToolbar_SetColors( h, @tc3 )
+            sD = "menu.Back=&h" & hex(pPM->colors.BackColor) & " expect=&h" & hex(BGR(9,9,9)) & " (claimed)"
+            TBRTest_Check( "menu: a claimed palette survives a later bar re-theme", _
+                           (pPM->colors.BackColor = BGR(9,9,9)), sD )
+
+            ' A menu created AFTER the claim must get the claimed colors too, not the black
+            ' default -- the case a naive "if claimed then exit" guard would get wrong.
+            dim as long dLate = PsToolbar_AddItem( h, TBR_KIND_DROPDOWN, GLYPH, "Late", 599 )
+            dim as PSPOPUPMENU ptr pPM2 = GetPopupMenuPointer( PsToolbar_GetItemMenu( h, dLate ) )
+            if pPM2 = 0 then
+                TBRTest_Check( "menu: a menu created after the claim gets the claimed colors", false, "no pointer" )
+            else
+                sD = "late menu.Back=&h" & hex(pPM2->colors.BackColor) & " expect=&h" & hex(BGR(9,9,9))
+                TBRTest_Check( "menu: a menu created after the claim gets the claimed colors", _
+                               (pPM2->colors.BackColor = BGR(9,9,9)), sD )
+            end if
+            PsToolbar_DeleteItem( h, dLate )
+
+            ' Restore, so the render probes below measure the real palette.
+            pT->bMenuColorsCustom = false
+            PsToolbar_SetColors( h, @tc )
+        end if
 
         TBRTest_Check( "menu: FilterMessage is a no-op when nothing is open", _
                        (PsToolbar_FilterMessage( h, 0 ) = false), "null MSG returns false" )

@@ -216,6 +216,16 @@ two members checked. Clicking the member that is already checked is a silent no-
 radio button behaves. "Nothing checked" is a legal state you can set programmatically but the
 user cannot reach.
 
+### Menus are themed from the bar
+
+`PSPOPUPMENU_COLORS` carries no defaults except its separator colour, so a popup menu that is
+never given colours renders black on black. Every menu this toolbar creates is therefore themed
+from `PSTOOLBAR_COLORS` at creation, and re-themed whenever you call `PsToolbar_SetColors` — so
+theming the bar themes its menus for free and you set one palette.
+
+If you want a different look for the menus, `PsToolbar_SetMenuColors` claims them permanently:
+from then on a bar re-theme leaves them alone, and menus created later still get your palette.
+
 ### Menus are owned by the toolbar, filled by you
 
 `PsToolbar_GetItemMenu` creates the item's `PsPopupMenu` on first call and hands it to you. Fill
@@ -379,6 +389,7 @@ is set it uses the text font. Measuring and painting always use the same font.
 |---|---|
 | `PsToolbar_GetItemMenu( h, idx ) as HWND` | Creates the item's menu on first call and returns it thereafter. The toolbar destroys it. Handle its commands with `PsPopupMenu_SetSelectCallback`. |
 | `PsToolbar_GetOverflowMenu( h ) as HWND` | The overflow menu — for theming only. Its rows are rebuilt on every open. |
+| `PsToolbar_SetMenuColors( h, pColors )` | Claims the palette of **every** menu this toolbar owns, present and future. After this, re-theming the bar no longer touches them. |
 | `PsToolbar_IsDroppedDown( h ) as boolean` | Is any menu of this toolbar's open. |
 | `PsToolbar_GetDroppedItem( h ) as long` | Which item's menu is open; −1 for the overflow menu **or** for nothing. Pair with `IsDroppedDown` to tell those apart. |
 | `PsToolbar_DropDown( h, idx ) as boolean` | Opens a menu programmatically; `idx = -1` opens the overflow menu. Still fires `DropDownCallback`. Returns FALSE — and reports a balanced open/close pair — if the menu has no rows. |
