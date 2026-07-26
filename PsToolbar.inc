@@ -874,6 +874,92 @@ end sub
 
 
 ' ========================================================================================
+' Which child window sent this message, and which CONTROL cell is it in?
+'
+' WM_COMMAND carries the child in lParam (0 means a menu or accelerator, not a control);
+' WM_NOTIFY carries it in the NMHDR; the WM_CTLCOLOR* family carries it in lParam too.
+' ========================================================================================
+private function PsToolbar_NotifySender( _
+            byval uMsg as UINT, _
+            byval wParam as WPARAM, _
+            byval lParam as LPARAM _
+            ) as HWND
+    select case uMsg
+    case WM_COMMAND
+        return cast( HWND, lParam )
+    case WM_NOTIFY
+        dim as NMHDR ptr pnmh = cast( NMHDR ptr, lParam )
+        if pnmh = 0 then return 0
+        return pnmh->hwndFrom
+    case WM_CTLCOLORSTATIC, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, _
+         WM_CTLCOLORLISTBOX, WM_CTLCOLORSCROLLBAR, WM_CTLCOLORDLG
+        return cast( HWND, lParam )
+    end select
+    return 0
+end function
+
+
+' ========================================================================================
+' Hand a child's notification to the host, then -- if unclaimed -- to the toolbar's own
+' parent.
+'
+' THIS EXISTS BECAUSE PARENTING THE CHILD TO THE TOOLBAR INTERCEPTS ITS NOTIFICATIONS. A
+' TBR_KIND_CONTROL child must be parented here so the toolbar can place it in its own client
+' coordinates -- and the price is that every message the child sends to "its parent" lands in
+' this window procedure instead of the host's form procedure, where it would otherwise have
+' gone. Forwarding is what makes an existing form keep working when a control moves onto a
+' toolbar (PsScrollPanel's rule, and the same reason it needed an lResult).
+'
+' Returns TRUE when the message was answered, with the value to return in lResult.
+' ========================================================================================
+private function PsToolbar_DispatchControlNotify( _
+            byval pTB as PSTOOLBAR ptr, _
+            byval hToolbar as HWND, _
+            byval uMsg as UINT, _
+            byval wParam as WPARAM, _
+            byval lParam as LPARAM, _
+            byref lResult as LRESULT _
+            ) as boolean
+
+    lResult = 0
+    if pTB = null then return false
+
+    dim as HWND hChild = PsToolbar_NotifySender( uMsg, wParam, lParam )
+
+    if pTB->ControlNotifyCallback then
+        dim m as PSTOOLBAR_CONTROLNOTIFY
+        m.hToolbar = hToolbar
+        m.hChild   = hChild
+        m.idx      = -1
+        if hChild <> 0 then
+            for i as long = 0 to pTB->itemCount - 1
+                if pTB->items(i).hChild = hChild then
+                    m.idx = i
+                    exit for
+                end if
+            next
+        end if
+        m.uMsg    = uMsg
+        m.wParam  = wParam
+        m.lParam  = lParam
+        m.lResult = 0
+        if pTB->ControlNotifyCallback( @m ) then
+            lResult = m.lResult
+            return true
+        end if
+    end if
+
+    ' Not claimed: send it where it would have gone if the toolbar were not in the way.
+    dim as HWND hOwner = GetParent( hToolbar )
+    if hOwner then
+        lResult = SendMessage( hOwner, uMsg, wParam, lParam )
+        return true
+    end if
+    return false
+end function
+
+
+' ========================================================================================
 ' PsToolbar Window procedure
 '
 ' CAPTURE IS DECIDED PER ZONE HERE, WHICH IS NEW TO THIS FAMILY. The family's one-line test
@@ -1130,6 +1216,19 @@ function PsToolbar_WndProc( _
             return 0
         end if
 
+    case WM_COMMAND, WM_HSCROLL, WM_VSCROLL, _
+         WM_CTLCOLORSTATIC, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, _
+         WM_CTLCOLORLISTBOX, WM_CTLCOLORSCROLLBAR, WM_CTLCOLORDLG
+        ' A TBR_KIND_CONTROL child talking to its parent. The toolbar deliberately supplies
+        ' no default colours here: it positions a host's child and never paints or themes it,
+        ' so an unclaimed WM_CTLCOLOR* falls through to the system exactly as it would have.
+        if pTB then
+            dim as LRESULT lRes
+            if PsToolbar_DispatchControlNotify( pTB, hwnd, uMsg, wParam, lParam, lRes ) then
+                return lRes
+            end if
+        end if
+
     case WM_NOTIFY
         ' The tooltip asks for its text on demand; supply the current hot item's.
         dim as NMHDR ptr pnmh = cast(NMHDR ptr, lParam)
@@ -1142,6 +1241,13 @@ function PsToolbar_WndProc( _
                 pdi->hinst    = NULL
             end if
             return 0
+        end if
+        ' Not the tooltip: a CONTROL cell's child notifying its parent.
+        if pTB then
+            dim as LRESULT lRes
+            if PsToolbar_DispatchControlNotify( pTB, hwnd, uMsg, wParam, lParam, lRes ) then
+                return lRes
+            end if
         end if
 
     case WM_DESTROY
@@ -1571,6 +1677,16 @@ function PsToolbar_GetItemChild( byval hToolbar as HWND, byval idx as long ) as 
     dim as PSTOOLBAR_ITEM ptr pItem = pTB->GetItem(idx)
     if pItem = null then return 0
     return pItem->hChild
+end function
+
+function PsToolbar_FindItemByChild( byval hToolbar as HWND, byval hChild as HWND ) as long
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = null then return -1
+    if hChild = 0 then return -1
+    for i as long = 0 to pTB->itemCount - 1
+        if pTB->items(i).hChild = hChild then return i
+    next
+    return -1
 end function
 
 function PsToolbar_Click( byval hToolbar as HWND, byval idx as long ) as boolean
@@ -2089,6 +2205,12 @@ sub PsToolbar_SetDropDownCallback( byval hToolbar as HWND, byval usersub as TBR_
     pTB->DropDownCallback = usersub
 end sub
 
+sub PsToolbar_SetControlNotifyCallback( byval hToolbar as HWND, byval userfunc as TBR_ControlNotifyFunc )
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = null then exit sub
+    pTB->ControlNotifyCallback = userfunc
+end sub
+
 
 ' ========================================================================================
 ' THE message-pump hook. See the contract in PsToolbar.bi.
@@ -2384,6 +2506,25 @@ end sub
 private sub TBRTest_Click( byval hToolbar as HWND, byval idx as long, byval id as long )
     gTBR_Log &= "C" & str(idx) & "/" & str(id) & ";"
 end sub
+
+dim shared as long   gTBR_NotifyIdx
+dim shared as HWND   gTBR_NotifyChild
+dim shared as UINT   gTBR_NotifyMsg
+dim shared as long   gTBR_NotifyCount
+dim shared as boolean gTBR_NotifyClaim
+
+private function TBRTest_ControlNotify( byval m as PSTOOLBAR_CONTROLNOTIFY ptr ) as boolean
+    if m = 0 then return false
+    gTBR_NotifyCount += 1
+    gTBR_NotifyIdx    = m->idx
+    gTBR_NotifyChild  = m->hChild
+    gTBR_NotifyMsg    = m->uMsg
+    if gTBR_NotifyClaim then
+        m->lResult = 12345
+        return true
+    end if
+    return false
+end function
 
 private sub TBRTest_DropDown( byval hToolbar as HWND, byval idx as long, byval hMenu as HWND, byval isOpen as boolean )
     if isOpen then gTBR_DropOpens += 1 else gTBR_DropCloses += 1
@@ -3335,6 +3476,89 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
         TBRTest_Check( "menu: CloseUp on a closed bar is a no-op", (gTBR_DropCloses = 0), sD )
 
         PsToolbar_SetDropDownCallback( h, 0 )
+    end scope
+
+
+    ' ====================================================================================
+    ' PART K2 -- a CONTROL cell's child talking to its parent.
+    '
+    ' Parenting the child to the TOOLBAR is what makes the cell work, and it is also what
+    ' intercepts every notification the child sends. These assert that the interception is
+    ' undone rather than merely documented.
+    ' ====================================================================================
+    scope
+        PsToolbar_Clear( h )
+        dim as long c0 = PsToolbar_AddItem( h, TBR_KIND_COMMAND, GLYPH, "Cmd", 701 )
+
+        ' A real child window, parented to the toolbar exactly as a host must do it.
+        dim as HWND hKid = CreateWindowExW( 0, "EDIT", "kid", _
+                                            WS_CHILD or ES_AUTOHSCROLL, _
+                                            0, 0, 0, 0, h, cast(HMENU, 4242), _
+                                            GetModuleHandleW(null), null )
+        dim as long cCtl = PsToolbar_AddControl( h, hKid, 100, 20, 702 )
+        SetWindowPos( h, 0, 0, 0, W, HH, SWP_NOZORDER or SWP_NOACTIVATE )
+
+        sD = "GetItemChild=" & str(cast(integer, PsToolbar_GetItemChild(h, cCtl)) <> 0) & _
+             " FindItemByChild=" & str(PsToolbar_FindItemByChild( h, hKid )) & " expect=" & str(cCtl)
+        TBRTest_Check( "control cell: the child maps back to its item", _
+                       (PsToolbar_GetItemChild( h, cCtl ) = hKid) andalso _
+                       (PsToolbar_FindItemByChild( h, hKid ) = cCtl), sD )
+
+        sD = "FindItemByChild(h)=" & str(PsToolbar_FindItemByChild( h, h ))
+        TBRTest_Check( "control cell: an unknown window maps to -1", _
+                       (PsToolbar_FindItemByChild( h, h ) = -1) andalso _
+                       (PsToolbar_FindItemByChild( h, 0 ) = -1), sD )
+
+        PsToolbar_SetControlNotifyCallback( h, @TBRTest_ControlNotify )
+
+        ' EN_SETFOCUS as the child itself would send it: HIWORD(wParam) = code,
+        ' LOWORD(wParam) = id, lParam = the child.
+        gTBR_NotifyCount = 0 : gTBR_NotifyClaim = false
+        dim as WPARAM wp = cast( WPARAM, (cast(ulong, EN_SETFOCUS) shl 16) or 4242 )
+        SendMessageW( h, WM_COMMAND, wp, cast( LPARAM, hKid ) )
+        sD = "count=" & str(gTBR_NotifyCount) & " idx=" & str(gTBR_NotifyIdx) & _
+             " expect idx=" & str(cCtl) & " childMatches=" & str(gTBR_NotifyChild = hKid)
+        TBRTest_Check( "control cell: a child's WM_COMMAND reaches the notify callback", _
+                       (gTBR_NotifyCount = 1) andalso (gTBR_NotifyIdx = cCtl) andalso _
+                       (gTBR_NotifyChild = hKid) andalso (gTBR_NotifyMsg = WM_COMMAND), sD )
+
+        ' WM_CTLCOLOR* is a different message family and must arrive too -- it is the one a
+        ' host needs in order to theme its child.
+        gTBR_NotifyCount = 0
+        SendMessageW( h, WM_CTLCOLOREDIT, 0, cast( LPARAM, hKid ) )
+        sD = "count=" & str(gTBR_NotifyCount) & " msg=" & str(gTBR_NotifyMsg)
+        TBRTest_Check( "control cell: WM_CTLCOLOR* reaches the callback too", _
+                       (gTBR_NotifyCount = 1) andalso (gTBR_NotifyMsg = WM_CTLCOLOREDIT), sD )
+
+        ' A message from a window that is NOT one of our cells must report idx = -1 rather
+        ' than a wrong index -- the toolbar is the parent of the tooltip and of nothing else,
+        ' but a host can still route anything it likes here.
+        gTBR_NotifyCount = 0
+        SendMessageW( h, WM_COMMAND, wp, cast( LPARAM, HWND_DESKTOP ) )
+        sD = "idx=" & str(gTBR_NotifyIdx)
+        TBRTest_Check( "control cell: a message from an unknown window reports idx = -1", _
+                       (gTBR_NotifyCount = 1) andalso (gTBR_NotifyIdx = -1), sD )
+
+        ' Claiming the message returns the callback's lResult -- the whole reason the struct
+        ' carries one, since WM_CTLCOLOR* is answered with an HBRUSH.
+        gTBR_NotifyClaim = true
+        dim as LRESULT lr = SendMessageW( h, WM_CTLCOLOREDIT, 0, cast( LPARAM, hKid ) )
+        sD = "returned=" & str(lr) & " expect=12345"
+        TBRTest_Check( "control cell: a claimed message returns the callback's lResult", _
+                       (lr = 12345), sD )
+        gTBR_NotifyClaim = false
+
+        ' With NO callback the message must still go somewhere: forwarded to the toolbar's
+        ' own parent, which is where it would have gone had the toolbar not been in the way.
+        PsToolbar_SetControlNotifyCallback( h, 0 )
+        gTBR_NotifyCount = 0
+        SendMessageW( h, WM_COMMAND, wp, cast( LPARAM, hKid ) )
+        sD = "callback count=" & str(gTBR_NotifyCount) & " (no callback set; must not crash)"
+        TBRTest_Check( "control cell: with no callback the message is forwarded, not dropped", _
+                       (gTBR_NotifyCount = 0), sD )
+
+        DestroyWindow( hKid )
+        PsToolbar_Clear( h )
     end scope
 
 

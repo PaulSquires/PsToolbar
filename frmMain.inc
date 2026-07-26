@@ -172,6 +172,40 @@ sub PsToolbar_DropDownCallback( byval hToolbar as HWND, byval idx as long, byval
 end sub
 
 
+' ========================================================================================
+' A TBR_KIND_CONTROL cell's child talking to its parent.
+'
+' The child is parented to the TOOLBAR, so its notifications land there rather than in this
+' form procedure -- the toolbar hands them here first, then forwards anything unclaimed to
+' the form, so either style works.
+'
+' The toolbar does not interpret notification codes and cannot: EN_SETFOCUS, CBN_SETFOCUS and
+' BN_SETFOCUS are different numbers and a generic cell does not know its child's class. The
+' HOST knows, because the host created the child.
+' ========================================================================================
+function PsToolbar_ControlNotifyCallback( byval m as PSTOOLBAR_CONTROLNOTIFY ptr ) as boolean
+    if m = 0 then return false
+    if m->uMsg <> WM_COMMAND then return false
+    if m->hChild <> HWND_SEARCHBOX then return false
+
+    select case hiword( m->wParam )
+    case EN_SETFOCUS
+        ' Select the whole thing so typing replaces it -- the usual search-box behaviour.
+        SendMessageW( m->hChild, EM_SETSEL, 0, -1 )
+        print "search box: focus in (idx=" & str(m->idx) & ", text selected)"
+    case EN_KILLFOCUS
+        ' Straight into a `dim as string` first: PRINT on a DWSTRING, or on a
+        ' string & wstring concat, interleaves nulls (the family's tracing rule).
+        dim as string sTxt = AfxGetWindowText( m->hChild )
+        dim as string s = "search box: focus out, text='" & sTxt & "'"
+        print s
+    case EN_CHANGE
+        print "search box: text changed"
+    end select
+    return false          ' observed, not claimed -- let it reach the form too
+end function
+
+
 ' A dropdown menu's own commands come back through PsPopupMenu's select callback, NOT
 ' through the toolbar -- the toolbar registers itself as the notify window so it can track
 ' open/close state, and leaves the command door to the host.
@@ -361,6 +395,7 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
         PsToolbar_SetClickCallback( hBars(i), @PsToolbar_ClickCallback )
         PsToolbar_SetSelChangeCallback( hBars(i), @PsToolbar_SelChangeCallback )
         PsToolbar_SetDropDownCallback( hBars(i), @PsToolbar_DropDownCallback )
+        PsToolbar_SetControlNotifyCallback( hBars(i), @PsToolbar_ControlNotifyCallback )
     next
 
     BuildMainToolbar( HWND_TOOLBAR_MAIN, pWindow )
@@ -424,6 +459,13 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
     ' Screenshot hook: opens the Run split button's menu so a capture can show a dropdown
     ' without synthetic mouse input. Deterministic, and it exercises the programmatic
     ' DropDown path at the same time.
+    ' End-to-end check that a REAL EDIT's EN_SETFOCUS travels child -> toolbar -> host
+    ' callback. The self-test drives that path with synthetic messages; this drives it with
+    ' Windows actually generating the notification.
+    if environ("PSTOOLBAR_DEMO_FOCUS") = "1" then
+        SetFocus( HWND_SEARCHBOX )
+    end if
+
     if environ("PSTOOLBAR_DEMO_DROPDOWN") = "1" then
         PsToolbar_DropDown( HWND_TOOLBAR_MAIN, PsToolbar_FindItemByID( HWND_TOOLBAR_MAIN, IDM_RUN ) )
     end if

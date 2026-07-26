@@ -245,6 +245,46 @@ Parent the child to the **toolbar**, not to your form: the toolbar positions it 
 `SetWindowPos` in its own client coordinates. You create it, you own it, you destroy it. On
 `PsToolbar_DeleteItem` or `PsToolbar_Clear` the child is hidden and forgotten, never destroyed.
 
+**Reading it** needs nothing from the toolbar — you created the window, so use it directly.
+`PsToolbar_GetItemChild` hands back the `HWND` if you did not keep it, and
+`PsToolbar_FindItemByChild` goes the other way.
+
+**Hearing from it** does need something, because parenting the child here is what makes the
+cell work and is also what intercepts its notifications: `WM_COMMAND` (`EN_CHANGE`,
+`EN_SETFOCUS`, `CBN_SELCHANGE`, …), `WM_NOTIFY` and the `WM_CTLCOLOR*` family are all sent to
+"the parent", which is now the toolbar rather than your form. Two ways to get them back:
+
+- **Do nothing.** Anything the toolbar is not asked to claim is **forwarded to the toolbar's
+  own parent**, so a form that already handles these in its window procedure keeps working
+  unchanged.
+- **Register `PsToolbar_SetControlNotifyCallback`** and see them first.
+
+The toolbar does not interpret notification codes and cannot: `EN_SETFOCUS`, `CBN_SETFOCUS`
+and `BN_SETFOCUS` are different numbers, and a generic cell does not know its child's class.
+You get the raw message with the item resolved. Selecting the text when a search box gains
+focus:
+
+```freebasic
+function OnControlNotify( byval m as PSTOOLBAR_CONTROLNOTIFY ptr ) as boolean
+    if m->uMsg <> WM_COMMAND then return false
+    if m->hChild <> ghSearchBox then return false
+
+    select case hiword( m->wParam )
+    case EN_SETFOCUS
+        SendMessageW( m->hChild, EM_SETSEL, 0, -1 )      ' select all
+    case EN_KILLFOCUS
+        dim as string sText = AfxGetWindowText( m->hChild )
+        ApplyFilter( sText )
+    end select
+    return false          ' observed, not claimed -- let it reach the form too
+end function
+```
+
+Return TRUE to claim a message, and set `m->lResult` first if it needs a return value —
+`WM_CTLCOLOR*` is answered with an `HBRUSH`. The toolbar supplies no default for those: it
+positions your child and never themes it, so an unclaimed `WM_CTLCOLOR*` behaves exactly as
+it would have without the toolbar.
+
 ## Behaviour and limits
 
 - **Horizontal only.** There is no vertical orientation.
@@ -326,6 +366,7 @@ if *you* hold an item index across one, fix up yours.
 | `PsToolbar_GetItemGravity( h, idx ) as long` | `TBR_GRAVITY_LEFT` / `TBR_GRAVITY_RIGHT`. |
 | `PsToolbar_SetItemGravity( h, idx, nGravity ) as boolean` | Moves the item to the other end of the bar. |
 | `PsToolbar_GetItemChild( h, idx ) as HWND` | The child window of a control cell, or 0. |
+| `PsToolbar_FindItemByChild( h, hChild ) as long` | The control item holding that child, or −1. The reverse of the above. |
 | `PsToolbar_Click( h, idx ) as boolean` | An **action**: activates the item and **fires** `ClickCallback` (or toggles, or opens a dropdown, by kind). Refuses invalid, disabled, separator and control items. The door for an accelerator. |
 | `PsToolbar_Toggle( h, idx ) as boolean` | Flips a toggle as a user click would, enforcing its group, and **fires** `SelChangeCallback`. Refuses anything that is not an enabled `TBR_KIND_TOGGLE`. |
 
@@ -417,6 +458,7 @@ fallback to the caption.
 | `PsToolbar_SetClickCallback( h, usersub )` | Command and split-action clicks. |
 | `PsToolbar_SetSelChangeCallback( h, usersub )` | Toggle latch/unlatch by the user. |
 | `PsToolbar_SetDropDownCallback( h, usersub )` | Menu opened or closed. |
+| `PsToolbar_SetControlNotifyCallback( h, userfunc )` | Messages a `TBR_KIND_CONTROL` child sent to its parent. |
 
 Pass `0` to any of these to remove the callback.
 
@@ -576,6 +618,26 @@ type TBR_SelChangeCallbackSub as sub( byval hToolbar as HWND, byval idx as long,
 A toggle latched or unlatched **by the user**. Fires after the state is updated, so
 `PsToolbar_GetSelected` already agrees. For a radio group both edges fire, loser first, with both
 state writes landing before either callback. `PsToolbar_SetSelected` does not fire it.
+
+### Control notify
+
+```freebasic
+type TBR_ControlNotifyFunc as function( byval m as PSTOOLBAR_CONTROLNOTIFY ptr ) as boolean
+```
+
+A `TBR_KIND_CONTROL` cell's child sent a message to its parent. Return TRUE to claim it,
+having set `m->lResult` if it needs a value; return FALSE and it is forwarded to the toolbar's
+own parent. See *Child windows in a CONTROL cell* for the worked example.
+
+`PSTOOLBAR_CONTROLNOTIFY`:
+
+| Field | Meaning |
+|---|---|
+| `hToolbar` | |
+| `idx` | The control item that sent it, or −1 if the sender is not one of them |
+| `hChild` | The sending child window, or 0 when it cannot be identified |
+| `uMsg`, `wParam`, `lParam` | The raw message |
+| `lResult` | The value to return when you claim the message |
 
 ### Drop down
 

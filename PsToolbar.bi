@@ -263,6 +263,32 @@ type TBR_MessageCallbackFunc as function( byval m as PSTOOLBAR_MESSAGEINFO ptr )
 ' none, and a captioned item showing its own caption as a tip is noise.
 type TBR_TooltipCallbackFunc as function( byval hToolbar as HWND, byval idx as long ) as DWSTRING
 
+' ----------------------------------------------------------------------------------------
+' A message a TBR_KIND_CONTROL cell's child sent to ITS PARENT -- which is this toolbar,
+' because that is where such a child must be parented. WM_COMMAND (EN_CHANGE, EN_SETFOCUS,
+' CBN_SELCHANGE, BN_CLICKED, ...), WM_NOTIFY, and the WM_CTLCOLOR* family all arrive here.
+'
+' THE CONTROL DOES NOT INTERPRET THE NOTIFICATION CODE, and cannot: EN_SETFOCUS, CBN_SETFOCUS
+' and BN_SETFOCUS are different numbers, and a generic cell does not know what class the child
+' is. You get the raw message, with the item resolved for you.
+'
+' Return TRUE if you handled it. If the message needs a return value -- WM_CTLCOLOR* wants an
+' HBRUSH -- put it in m->lResult first. Return FALSE and the message is FORWARDED to the
+' toolbar's own parent, so a host that already handles these in its form procedure keeps
+' working without writing a callback at all.
+' ----------------------------------------------------------------------------------------
+type PSTOOLBAR_CONTROLNOTIFY
+    hToolbar as HWND
+    idx      as long       ' the CONTROL item that sent it, or -1 if the sender is not one
+    hChild   as HWND       ' the sending child window, or 0 when it cannot be identified
+    uMsg     as UINT
+    wParam   as WPARAM
+    lParam   as LPARAM
+    lResult  as LRESULT    ' the value to return when you claim the message
+end type
+
+type TBR_ControlNotifyFunc as function( byval m as PSTOOLBAR_CONTROLNOTIFY ptr ) as boolean
+
 ' A COMMAND item (or a SPLIT item's action zone) was clicked: a matched press+release on the
 ' same zone. Fires nothing for toggles (they report through SelChangeCallback) and nothing
 ' for a cancelled gesture (press, slide off, release).
@@ -458,6 +484,7 @@ type PSTOOLBAR
     ClickCallback      as TBR_ClickCallbackSub        ' optional; COMMAND / SPLIT action
     SelChangeCallback  as TBR_SelChangeCallbackSub    ' optional; TOGGLE, user only
     DropDownCallback   as TBR_DropDownCallbackSub     ' optional
+    ControlNotifyCallback as TBR_ControlNotifyFunc     ' optional; CONTROL cells' children
 
     declare sub      LayoutItems()
     declare function GetCount() as long
@@ -1310,6 +1337,9 @@ declare function PsToolbar_FindCheckedInGroup( byval hToolbar as HWND, byval nGr
 declare function PsToolbar_GetItemGravity( byval hToolbar as HWND, byval idx as long ) as long
 declare function PsToolbar_SetItemGravity( byval hToolbar as HWND, byval idx as long, byval nGravity as long ) as boolean
 declare function PsToolbar_GetItemChild( byval hToolbar as HWND, byval idx as long ) as HWND
+' Map a child window back to the CONTROL item holding it, or -1. The reverse of GetItemChild,
+' and what a notification handler uses to find out which cell spoke.
+declare function PsToolbar_FindItemByChild( byval hToolbar as HWND, byval hChild as HWND ) as long
 
 ' An ACTION, not a setter, so it FIRES the click callback -- PsButton_Click's precedent, and
 ' with no mnemonics and no keyboard this is the only door a host accelerator has. Returns
@@ -1435,6 +1465,7 @@ declare sub      PsToolbar_SetTooltipCallback( byval hToolbar as HWND, byval use
 declare sub      PsToolbar_SetClickCallback( byval hToolbar as HWND, byval usersub as TBR_ClickCallbackSub )
 declare sub      PsToolbar_SetSelChangeCallback( byval hToolbar as HWND, byval usersub as TBR_SelChangeCallbackSub )
 declare sub      PsToolbar_SetDropDownCallback( byval hToolbar as HWND, byval usersub as TBR_DropDownCallbackSub )
+declare sub      PsToolbar_SetControlNotifyCallback( byval hToolbar as HWND, byval userfunc as TBR_ControlNotifyFunc )
 
 ' ----------------------------------------------------------------------------------------
 ' THE message-pump hook. MANDATORY -- see the host obligations above.
