@@ -3,6 +3,9 @@
 ''
 
 #include once "PsToolbar.bi"
+' Image loader implementation, pulled in here so a host needs no extra include line
+' (#include once guards it if the host includes it too).
+#include once "PsImage.inc"
 
 
 ' Forward declarations for the private helpers that are used above their definitions.
@@ -655,8 +658,11 @@ private sub PsToolbar_PaintItemDefault( _
 
     b->SetColors( foreclr, backclr )
 
-    if len( p->wszGlyph ) then
-        if IsRectEmpty( @p->rcIcon ) = 0 then
+    ' Image first, else glyph. Both draw into the same declared icon cell (rcIcon).
+    if IsRectEmpty( @p->rcIcon ) = 0 then
+        if p->pImage then
+            b->PaintImage( p->pImage, @p->rcIcon, PS_IMGFIT_ASPECT )
+        elseif len( p->wszGlyph ) then
             b->SetFont( PsToolbar_ResolveGlyphFont( pTB ) )
             ' PaintText already adds DT_VCENTER / DT_SINGLELINE / DT_NOPREFIX.
             b->PaintText( p->wszGlyph, @p->rcIcon, DT_CENTER )
@@ -726,6 +732,7 @@ private sub PsToolbar_FillPaintInfo( _
         p->nMood        = PsToolbar_ResolveMood( true, false, pTB->bOverflowHot )
         p->wszGlyph     = ""
         p->wszText      = ""
+        p->pImage       = 0             ' the overflow button is always a chevron glyph
         exit sub
     end if
 
@@ -753,6 +760,7 @@ private sub PsToolbar_FillPaintInfo( _
         p->nMood      = PsToolbar_ResolveMood( .isEnabled, p->isPressed, p->isHot )
         p->wszGlyph   = .wszGlyph
         p->wszText    = .wszText
+        p->pImage     = iif( (.pImage <> 0) andalso (.pImage->IsValid() <> 0), .pImage->Image(), cast( CGpImage ptr, 0 ) )
     end with
 end sub
 
@@ -1260,12 +1268,14 @@ function PsToolbar_WndProc( _
             ' ...nor the capture, if we are being destroyed mid-press.
             if GetCapture() = hwnd then ReleaseCapture()
             pTB->CancelPress()
-            ' Every menu is ours; a host's CONTROL child is not, and is left alone.
+            ' Every menu is ours; a host's CONTROL child is not, and is left alone. Any
+            ' per-item image is ours too (raw pointer, not auto-freed by delete pTB).
             for i as long = 0 to pTB->itemCount - 1
                 if pTB->items(i).hMenu <> 0 then
                     if IsWindow( pTB->items(i).hMenu ) then DestroyWindow( pTB->items(i).hMenu )
                     pTB->items(i).hMenu = 0
                 end if
+                if pTB->items(i).pImage <> 0 then delete pTB->items(i).pImage : pTB->items(i).pImage = 0
             next
             if pTB->hOverflowMenu <> 0 then
                 if IsWindow( pTB->hOverflowMenu ) then DestroyWindow( pTB->hOverflowMenu )
@@ -1485,10 +1495,41 @@ function PsToolbar_SetGlyph( byval hToolbar as HWND, byval idx as long, byval Gl
     dim as PSTOOLBAR_ITEM ptr pItem = pTB->GetItem(idx)
     if pItem = null then return false
     pItem->wszGlyph = Glyph
+    ' Glyph OR image: setting an actual glyph frees any image on this item.
+    if (len( Glyph ) > 0) andalso (pItem->pImage <> 0) then
+        delete pItem->pImage : pItem->pImage = 0
+    end if
     ' Adding or removing a glyph changes whether the icon cell and the text gap are charged
     ' at all, so this is a LAYOUT change, not a repaint.
     pTB->Refresh()
     return true
+end function
+
+' ========================================================================================
+' Load an image into an item's icon cell, replacing its glyph. "" removes it. TRUE on a
+' successful load; on failure the empty image is dropped so nothing draws.
+' ========================================================================================
+function PsToolbar_SetItemImage( byval hToolbar as HWND, byval idx as long, byval Path as DWSTRING ) as boolean
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = null then return false
+    dim as PSTOOLBAR_ITEM ptr pItem = pTB->GetItem(idx)
+    if pItem = null then return false
+
+    if len( Path ) = 0 then
+        if pItem->pImage then delete pItem->pImage : pItem->pImage = 0
+        pTB->Refresh()
+        return false
+    end if
+
+    if pItem->pImage = 0 then pItem->pImage = new PsImage
+    dim as long bOK = pItem->pImage->Load( Path )
+    if bOK = 0 then
+        delete pItem->pImage : pItem->pImage = 0
+    else
+        pItem->wszGlyph = ""                 ' glyph OR image
+    end if
+    pTB->Refresh()
+    return (bOK <> 0)
 end function
 
 function PsToolbar_GetText( byval hToolbar as HWND, byval idx as long ) as DWSTRING
@@ -3641,6 +3682,82 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
         else
             TBRTest_Check( "probe: the overflow chevron draws ink", false, "no overflow rect at width 60" )
         end if
+    end scope
+
+
+    ' ====================================================================================
+    ' PART L2 -- a real image in an icon cell.
+    '
+    ' The strong claim is the EQUIVALENCE: an image charges the exact same cell a glyph does,
+    ' proven by measuring both rather than trusting the cell-width formula. Multi-tone image on
+    ' purpose, or the render probe below could not tell it from a wiped cell.
+    ' ====================================================================================
+    scope
+        PsToolbar_Clear( h )
+        dim as wstring * 260 wszTmp = "__pstbr_st.png"
+        scope
+            dim as BITMAPINFO bi
+            bi.bmiHeader.biSize        = sizeof( BITMAPINFOHEADER )
+            bi.bmiHeader.biWidth       = 24
+            bi.bmiHeader.biHeight      = -24
+            bi.bmiHeader.biPlanes      = 1
+            bi.bmiHeader.biBitCount    = 32
+            bi.bmiHeader.biCompression = BI_RGB
+            dim as ulong ptr pB
+            dim as HBITMAP hbm = CreateDIBSection( null, @bi, DIB_RGB_COLORS, cast(any ptr ptr, @pB), null, 0 )
+            if hbm andalso pB then
+                for yy as long = 0 to 23
+                    for xx as long = 0 to 23
+                        dim as ulong c = &hFF3399EE
+                        if ((xx < 12) xor (yy < 12)) then c = &hFFEE9933
+                        pB[yy * 24 + xx] = c
+                    next
+                next
+                dim as PsImage tmp
+                tmp.LoadFromBitmap( hbm )
+                if tmp.IsValid() then AfxGdipSaveImageToPng( tmp.Image()->m_pImage, wszTmp )
+            end if
+            if hbm then DeleteObject( hbm )
+        end scope
+
+        ' A caption-only item (no icon cell) is the baseline.
+        dim as long q0 = PsToolbar_AddItem( h, TBR_KIND_COMMAND, "", "Img", 701 )
+        SetWindowPos( h, 0, 0, 0, 400, HH, SWP_NOZORDER or SWP_NOACTIVATE )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellNoIcon = pT->items(q0).nCellWidth
+
+        ' Cell width with a glyph.
+        PsToolbar_SetGlyph( h, q0, "A" )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellGlyph = pT->items(q0).nCellWidth
+
+        ' Cell width with an image (which also clears the glyph -- either/or).
+        dim as boolean okImg = PsToolbar_SetItemImage( h, q0, wszTmp )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellImg = pT->items(q0).nCellWidth
+
+        TBRTest_Check( "SetItemImage loads the file", okImg, "returned " & str(okImg) )
+        sD = "noIcon=" & str(cellNoIcon) & " glyph=" & str(cellGlyph) & " image=" & str(cellImg)
+        TBRTest_Check( "an image reserves an icon cell (cell grows)", (cellImg > cellNoIcon), sD )
+        TBRTest_Check( "an image charges the SAME cell a glyph does", (cellImg = cellGlyph), sD )
+
+        dim as wstring * 8 wg = PsToolbar_GetGlyph( h, q0 )
+        TBRTest_Check( "setting an image clears the item glyph", (len(wg) = 0), "glyph=[" & str(wg) & "]" )
+
+        ' Render: the image reached the icon cell.
+        SetWindowPos( h, 0, 0, 0, 400, HH, SWP_NOZORDER or SWP_NOACTIVATE )
+        dim as long tImg = PsToolbar_CountRenderedTones( h, TBR_PART_ICON, q0 )
+        TBRTest_Check( "the image draws ink into the icon cell", (tImg >= 4), "icon tones=" & str(tImg) )
+
+        ' Removing the image reclaims the cell exactly.
+        PsToolbar_SetItemImage( h, q0, "" )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellRemoved = pT->items(q0).nCellWidth
+        TBRTest_Check( "removing the image reclaims the icon cell", (cellRemoved = cellNoIcon), _
+                       "now=" & str(cellRemoved) & " base=" & str(cellNoIcon) )
+
+        PsToolbar_Clear( h )
+        DeleteFileW( wszTmp )
     end scope
 
 

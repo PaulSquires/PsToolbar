@@ -19,6 +19,9 @@
 
 #include once "PsBufferPaint.bi"
 #include once "PsPopupMenu.bi"
+' An item can show a real image file (.ico/.png/.bmp/.jpg) instead of a Fluent glyph.
+' PsImage owns the decode; PsBufferPaint.PaintImage draws it. See PsToolbar_SetItemImage.
+#include once "PsImage.bi"
 
 
 ' Polling timer that guarantees hot-tracking is cleared when the mouse leaves the control.
@@ -147,6 +150,10 @@ end type
 type PSTOOLBAR_ITEM
     itemKind       as long = TBR_KIND_COMMAND
     wszGlyph       as DWSTRING          ' Segoe Fluent Icons codepoint(s); "" = no icon cell
+    ' An image drawn in the icon cell INSTEAD OF the glyph. The toolbar OWNS this PsImage and
+    ' frees it on removal and on destroy. The slot is glyph OR image: SetItemImage clears
+    ' wszGlyph, SetGlyph frees pImage. A valid image charges the icon cell exactly as a glyph.
+    pImage         as PsImage ptr
     wszText        as DWSTRING          ' caption; "" = no caption and no text gap charged
     wszTooltip     as DWSTRING          ' "" = ask TooltipCallback, then show nothing
     id             as long = 0          ' host command id, reported by ClickCallback
@@ -215,6 +222,9 @@ type PSTOOLBAR_PAINTINFO
     isDropped   as boolean              ' this item's menu is currently open
     wszGlyph    as DWSTRING
     wszText     as DWSTRING
+    ' Resolved image handle for this item's cell, or NULL. When set, draw this image via
+    ' p->b->PaintImage INSTEAD OF the glyph -- a custom painter should honour it, image first.
+    pImage      as CGpImage ptr
 end type
 
 type PSTOOLBAR_MESSAGEINFO
@@ -735,8 +745,10 @@ sub PSTOOLBAR.LayoutItems()
             padB(i)  = iif( .nPadBefore < 0, this.nPadBefore, .nPadBefore )
             padA(i)  = iif( .nPadAfter  < 0, this.nPadAfter,  .nPadAfter )
             iconH(i) = iif( .nIconHeight = 0, this.nIconHeight, .nIconHeight )
-            ' An icon cell is charged only when the item actually carries a glyph.
-            if len(.wszGlyph) then
+            ' An icon cell is charged when the item carries a glyph OR a valid image.
+            dim as boolean bHasIcon = (len(.wszGlyph) > 0) orelse _
+                                      ((.pImage <> 0) andalso (.pImage->IsValid() <> 0))
+            if bHasIcon then
                 iconW(i) = iif( .nIconWidth = 0, this.nIconWidth, .nIconWidth )
             else
                 iconW(i) = 0
@@ -758,7 +770,7 @@ sub PSTOOLBAR.LayoutItems()
             case TBR_KIND_SEPARATOR
                 ' contributes nothing: its rule is sized from the band, not the reverse
             case else
-                dim as boolean bNeedsGlyphBox = (len(.wszGlyph) > 0)
+                dim as boolean bNeedsGlyphBox = bHasIcon
                 if (.itemKind = TBR_KIND_SPLIT) orelse (.itemKind = TBR_KIND_DROPDOWN) then
                     bNeedsGlyphBox = true          ' the chevron occupies the same band
                 end if
@@ -1130,6 +1142,9 @@ function PSTOOLBAR.RemoveItemAt( byval idx as long ) as boolean
         if .hChild <> 0 then
             if IsWindow( .hChild ) then ShowWindow( .hChild, SW_HIDE )
         end if
+        ' Free the image BEFORE the shift copies items(idx+1) over this slot, or the pointer
+        ' leaks. Null it so the copy that follows cannot double-reference it.
+        if .pImage <> 0 then delete .pImage : .pImage = 0
     end with
 
     for i as long = idx to this.itemCount - 2
@@ -1137,13 +1152,16 @@ function PSTOOLBAR.RemoveItemAt( byval idx as long ) as boolean
     next
 
     ' Release the vacated tail slot's strings rather than leaving a stale copy in the
-    ' capacity region, where AddItemSlot's reset would be the only thing freeing it.
+    ' capacity region, where AddItemSlot's reset would be the only thing freeing it. pImage
+    ' is set to 0 (not deleted): after the shift the real pointer lives one slot down, and
+    ' this slot holds only a shallow duplicate.
     with this.items( this.itemCount - 1 )
         .wszGlyph   = ""
         .wszText    = ""
         .wszTooltip = ""
         .hMenu      = 0
         .hChild     = 0
+        .pImage     = 0
     end with
 
     this.itemCount -= 1
@@ -1196,6 +1214,7 @@ sub PSTOOLBAR.Clear()
                 if IsWindow( .hChild ) then ShowWindow( .hChild, SW_HIDE )
                 .hChild = 0
             end if
+            if .pImage <> 0 then delete .pImage : .pImage = 0
             .wszGlyph   = ""
             .wszText    = ""
             .wszTooltip = ""
@@ -1319,6 +1338,10 @@ declare function PsToolbar_HitTestEx( byval hToolbar as HWND, byval x as long, b
 declare function PsToolbar_GetItemKind( byval hToolbar as HWND, byval idx as long ) as long
 declare function PsToolbar_GetGlyph( byval hToolbar as HWND, byval idx as long ) as DWSTRING
 declare function PsToolbar_SetGlyph( byval hToolbar as HWND, byval idx as long, byval Glyph as DWSTRING ) as boolean
+' Load an image file (.ico/.png/.bmp/.jpg) into an item's icon cell, replacing its glyph.
+' "" removes it. Returns TRUE on a successful load. The image fits the item's icon cell,
+' aspect preserved; SPLIT/DROPDOWN chevrons and the overflow button stay Fluent glyphs.
+declare function PsToolbar_SetItemImage( byval hToolbar as HWND, byval idx as long, byval Path as DWSTRING ) as boolean
 declare function PsToolbar_GetText( byval hToolbar as HWND, byval idx as long ) as DWSTRING
 declare function PsToolbar_SetText( byval hToolbar as HWND, byval idx as long, byval Text as DWSTRING ) as boolean
 declare function PsToolbar_GetItemID( byval hToolbar as HWND, byval idx as long ) as long
