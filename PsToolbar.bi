@@ -1345,8 +1345,10 @@ declare function PsToolbar_GetItemKind( byval hToolbar as HWND, byval idx as lon
 declare function PsToolbar_GetGlyph( byval hToolbar as HWND, byval idx as long ) as DWSTRING
 declare function PsToolbar_SetGlyph( byval hToolbar as HWND, byval idx as long, byval Glyph as DWSTRING ) as boolean
 ' Load an image file (.ico/.png/.bmp/.jpg) into an item's icon cell, replacing its glyph.
-' "" removes it. Returns TRUE on a successful load. The image fits the item's icon cell,
-' aspect preserved; SPLIT/DROPDOWN chevrons and the overflow button stay Fluent glyphs.
+' "" removes whatever image is there. Returns TRUE when the item ends up as you asked -- a
+' successful load, OR a successful removal -- and FALSE only for a bad index or a file that
+' would not decode. The image fits the item's icon cell, aspect preserved; SPLIT/DROPDOWN
+' chevrons and the overflow button stay Fluent glyphs.
 declare function PsToolbar_SetItemImage( byval hToolbar as HWND, byval idx as long, byval Path as DWSTRING ) as boolean
 declare function PsToolbar_GetText( byval hToolbar as HWND, byval idx as long ) as DWSTRING
 declare function PsToolbar_SetText( byval hToolbar as HWND, byval idx as long, byval Text as DWSTRING ) as boolean

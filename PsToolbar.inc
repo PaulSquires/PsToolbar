@@ -1518,9 +1518,11 @@ function PsToolbar_SetItemImage( byval hToolbar as HWND, byval idx as long, byva
     if pItem = null then return false
 
     if len( Path ) = 0 then
+        ' Removal SUCCEEDS. It used to return FALSE, which a caller could not tell apart from
+        ' a load that failed -- so "did that do what I asked" had no answer on this path.
         if pItem->pImage then delete pItem->pImage : pItem->pImage = 0
         pTB->Refresh()
-        return false
+        return true
     end if
 
     if pItem->pImage = 0 then pItem->pImage = new PsImage
@@ -3794,8 +3796,19 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
         dim as long tImg = PsToolbar_CountRenderedTones( h, TBR_PART_ICON, q0 )
         TBRTest_Check( "the image draws ink into the icon cell", (tImg >= 4), "icon tones=" & str(tImg) )
 
-        ' Removing the image reclaims the cell exactly.
-        PsToolbar_SetItemImage( h, q0, "" )
+        ' Removing the image reclaims the cell exactly -- and REPORTS SUCCESS. That second
+        ' half is asserted because the return used to be FALSE here, identical to what a
+        ' failed load returns, so a caller had no way to tell the two apart. Failure is
+        ' asserted alongside it, or "always returns true" would pass just as well.
+        dim as boolean bRemoved = PsToolbar_SetItemImage( h, q0, "" )
+        TBRTest_Check( "removing an image reports SUCCESS, not the failure code", _
+            bRemoved, "empty-path removal returned " & str(bRemoved) )
+        dim as boolean bBadLoad = PsToolbar_SetItemImage( h, q0, "Z:\no\such\file.png" )
+        TBRTest_Check( "...while a load that cannot decode still reports failure", _
+            (bBadLoad = false), "bad path returned " & str(bBadLoad) )
+        dim as boolean bBadIdx = PsToolbar_SetItemImage( h, 9999, "" )
+        TBRTest_Check( "...and so does a bad index", _
+            (bBadIdx = false), "bad index returned " & str(bBadIdx) )
         PsToolbar_GetIdealSize( h, iw, ih )
         dim as long cellRemoved = pT->items(q0).nCellWidth
         TBRTest_Check( "removing the image reclaims the icon cell", (cellRemoved = cellNoIcon), _

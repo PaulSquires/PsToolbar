@@ -406,7 +406,7 @@ if *you* hold an item index across one, fix up yours.
 | `PsToolbar_GetItemKind( h, idx ) as long` | `TBR_KIND_*`, or −1 for an invalid index. |
 | `PsToolbar_GetGlyph( h, idx ) as DWSTRING` | The item's icon glyph. |
 | `PsToolbar_SetGlyph( h, idx, Glyph ) as boolean` | Sets it. Adding or removing a glyph changes whether the icon cell and text gap are charged, so this re-lays out. |
-| `PsToolbar_SetItemImage( h, idx, Path ) as boolean` | Loads a real `.ico` / `.png` / `.bmp` / `.jpg` into the item's icon cell **instead of** a glyph, and clears the glyph on success. `""` removes the image. Returns TRUE only on a successful load — a failed load, and removal, both return FALSE and leave the cell empty. Re-lays out. |
+| `PsToolbar_SetItemImage( h, idx, Path ) as boolean` | Loads a real `.ico` / `.png` / `.bmp` / `.jpg` into the item's icon cell **instead of** a glyph, and clears the glyph on success. `""` removes the image. Returns TRUE when the item ends up as you asked — a successful load, or a successful removal — and FALSE only for a bad index or a file that would not decode. Re-lays out. |
 | `PsToolbar_GetText( h, idx ) as DWSTRING` | The item's caption. |
 | `PsToolbar_SetText( h, idx, Text ) as boolean` | Sets it and re-measures. |
 | `PsToolbar_GetItemID( h, idx ) as long` | The command id. |
