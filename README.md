@@ -29,10 +29,14 @@ Repository: <https://github.com/PaulSquires/PsToolbar>
 | `PsToolbar.bi` / `PsToolbar.inc` | the control |
 | `PsPopupMenu.bi` / `PsPopupMenu.inc` | dropdown and overflow menus |
 | `PsBufferPaint.bi` / `PsBufferPaint.inc` | the flicker-free drawing surface |
+| `PsImage.bi` / `PsImage.inc` | the image loader behind `PsToolbar_SetItemImage`. Required even if you only ever use glyphs: `PsToolbar.bi` includes it. |
+| `PsTipHost.bi` / `PsTipHost.inc` | the tooltip backend switch — see *Tooltips: two backends* |
+| `PsTooltip.bi` / `PsTooltip.inc` | the owner-drawn tooltip. Required even if you never switch to it: `PsTipHost.inc` includes it. |
 | `SegoeFluentIcons.ttf` | optional — only if you use Segoe Fluent Icons glyphs |
 
-Copy all six source files into your project. If you already vendor `PsPopupMenu` or
-`PsBufferPaint`, you get one copy of each — `#include once` dedupes by resolved path.
+Copy all twelve source files into your project. If you already vendor `PsPopupMenu`,
+`PsBufferPaint`, `PsImage`, `PsTipHost` or `PsTooltip`, you get one copy of each —
+`#include once` dedupes by resolved path.
 
 ### Include order
 
@@ -44,6 +48,9 @@ first:
 #include once "PsPopupMenu.inc"
 #include once "PsToolbar.inc"
 ```
+
+`PsToolbar.inc` includes `PsImage.inc` and `PsTipHost.inc` (which in turn includes
+`PsTooltip.inc`) for you, so those three add no line to your host.
 
 ### GDI+ must be running
 
@@ -199,6 +206,24 @@ The **text font** is a layout input: changing it re-measures every caption and m
 The **glyph font** is a paint-time input only — the icon cell is a size you declare, never
 measured, so a glyph too large for its cell simply clips. Both fonts are borrowed; keep them
 alive and destroy them yourself.
+
+### An icon can be a glyph or a real image
+
+An item's icon slot holds **either** a Segoe Fluent Icons glyph **or** a picture loaded from a
+file — never both. The setters enforce that: `PsToolbar_SetItemImage` clears the glyph on a
+successful load, and `PsToolbar_SetGlyph` frees the image.
+
+The image is fitted into the **same declared icon cell a glyph would charge**, aspect preserved,
+so switching an item from a glyph to a picture costs no layout change and no re-sizing of the
+bar. An item with neither charges no icon cell at all.
+
+```freebasic
+PsToolbar_SetItemImage( ghToolbar, idxRun, AfxGetExePathName() & "icons\run.png" )
+```
+
+The toolbar **owns** every image it loaded and frees it for you — on `PsToolbar_DeleteItem`, on
+`PsToolbar_Clear`, and when the control is destroyed. Chevrons and the overflow button are
+always glyphs; there is no image path for the bar's own chrome.
 
 ### Programmatic setters are silent
 
@@ -381,6 +406,7 @@ if *you* hold an item index across one, fix up yours.
 | `PsToolbar_GetItemKind( h, idx ) as long` | `TBR_KIND_*`, or −1 for an invalid index. |
 | `PsToolbar_GetGlyph( h, idx ) as DWSTRING` | The item's icon glyph. |
 | `PsToolbar_SetGlyph( h, idx, Glyph ) as boolean` | Sets it. Adding or removing a glyph changes whether the icon cell and text gap are charged, so this re-lays out. |
+| `PsToolbar_SetItemImage( h, idx, Path ) as boolean` | Loads a real `.ico` / `.png` / `.bmp` / `.jpg` into the item's icon cell **instead of** a glyph, and clears the glyph on success. `""` removes the image. Returns TRUE when the item ends up as you asked — a successful load, or a successful removal — and FALSE only for a bad index or a file that would not decode. Re-lays out. |
 | `PsToolbar_GetText( h, idx ) as DWSTRING` | The item's caption. |
 | `PsToolbar_SetText( h, idx, Text ) as boolean` | Sets it and re-measures. |
 | `PsToolbar_GetItemID( h, idx ) as long` | The command id. |
@@ -475,11 +501,50 @@ is set it uses the text font. Measuring and painting always use the same font.
 |---|---|
 | `PsToolbar_GetTooltipText( h, idx ) as DWSTRING` | The item's own tooltip text. |
 | `PsToolbar_SetTooltipText( h, idx, Text ) as boolean` | Sets it. Per-item text wins over the callback. |
-| `PsToolbar_GetTooltipHandle( h ) as HWND` | The underlying tooltip window, for `TTM_*` customisation. |
-| `PsToolbar_SetHoverTime( h, milliseconds )` | Hover delay before a tip appears. Ignores values ≤ 0. |
+| `PsToolbar_GetTooltipHandle( h ) as HWND` | The **comctl32** tooltip window, for any `TTM_*` message you want to send it yourself. The toolbar owns it and destroys it. Returns **0** while this toolbar is on the PsTooltip backend — the honest answer, since a `TTM_*` sent to a PsTooltip window is silently ignored. |
+| `PsToolbar_GetPsTooltipHandle( h ) as HWND` | The **PsTooltip** window, or 0 while on the system backend. The door to `PsTooltip_SetColors` / `SetFonts` / `SetStyle` / `SetMaxWidth` / `SetTitle` / `SetGlyph` — none of which is mirrored here. |
+| `PsToolbar_SetTooltipMode( h, nMode ) as boolean` | `PSTIP_MODE_SYSTEM` (default) or `PSTIP_MODE_PS`. See below. |
+| `PsToolbar_GetTooltipMode( h ) as long` | Which backend is live. |
+| `PsToolbar_SetHoverTime( h, milliseconds )` | Initial delay (`TTDT_INITIAL`) — how long the cursor must rest before a tip appears. Honoured by **both** backends. **Double duty:** the same value is `TrackMouseEvent`'s `dwHoverTime`, so it also decides when the control considers an item hot. |
+| `PsToolbar_SetAutoPopTime( h, milliseconds )` | How long the tip stays up (`TTDT_AUTOPOP`). |
+| `PsToolbar_SetReshowTime( h, milliseconds )` | The shorter delay after a tip was recently dismissed (`TTDT_RESHOW`). |
 
 An item with neither its own text nor a callback answer shows no tooltip. There is no automatic
 fallback to the caption.
+
+#### Tooltips: two backends
+
+The toolbar ships on the **system** (comctl32) tooltip. `PSTIP_MODE_PS` switches this instance
+to **PsTooltip**: owner-drawn, themeable, word-wrapping without a hand-sent
+`TTM_SETMAXTIPWIDTH`, and — the one that matters structurally — **not a subclass of the control
+it serves**, so it still works when the window under the cursor is a descendant rather than the
+toolbar itself.
+
+The default is deliberate, not caution. PsTooltip's colour defaults are **dark**, so a control
+that switched itself would put a dark tip on a light form. Theme every tip in the process with
+`PsTooltip_SetDefaultColors` and friends, then opt in per instance.
+
+**The mode changes how a tip is drawn, never what it says.** Both backends resolve per-item text
+through the same rule — the item's own tooltip text first, then `TooltipCallback`, then nothing.
+
+All three delays are honoured by both backends and are **stored as well as pushed**, so a delay
+set before a mode switch is still in force after it. A delay you never set keeps the backend's
+own derivation from the system double-click time, which is what makes a tip appear on the same
+beat as every other tip on the machine.
+
+```freebasic
+PsTooltip_SetDefaultColors( @myTipColors )     ' once, at startup, for every tip in the process
+PsTooltip_SetDefaultFonts( ghFontUI )
+
+PsToolbar_SetTooltipMode( ghToolbar, PSTIP_MODE_PS )
+PsToolbar_SetHoverTime( ghToolbar, 400 )
+dim as HWND hTip = PsToolbar_GetPsTooltipHandle( ghToolbar )
+if hTip then PsTooltip_SetMaxWidth( hTip, 260 )   ' not reachable on the system backend
+```
+
+Neither backend adds a pump obligation — PsTooltip has no `FilterMessage`.
+`PsToolbar_FilterMessage` remains **mandatory** for an entirely separate reason: the dropdown
+and overflow menus are toolbar-owned `PsPopupMenu`s.
 
 ### Callback registration
 
@@ -599,6 +664,7 @@ Three rules:
 | `isDropped` | This item's menu is currently open |
 | `wszGlyph` | The icon glyph |
 | `wszText` | The caption |
+| `pImage` | The resolved `CGpImage ptr` for this item's icon cell, or NULL. When it is set, draw it with `p->b->PaintImage` **instead of** the glyph — a custom painter should honour it, image first |
 
 ### Message
 

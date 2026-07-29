@@ -322,6 +322,35 @@ sub PsToolbar_CustomPaintCallback( byval p as PSTOOLBAR_PAINTINFO ptr )
 end sub
 
 
+' Generate a small multi-colour PNG next to the exe, so BuildMainToolbar can show a REAL image
+' item beside the Fluent-glyph items. Procedural, so the repo commits no binary asset.
+private sub MakeSampleIconFile( byref wszPath as wstring )
+    const S = 32
+    dim as BITMAPINFO bi
+    bi.bmiHeader.biSize        = sizeof( BITMAPINFOHEADER )
+    bi.bmiHeader.biWidth       = S
+    bi.bmiHeader.biHeight      = -S
+    bi.bmiHeader.biPlanes      = 1
+    bi.bmiHeader.biBitCount    = 32
+    bi.bmiHeader.biCompression = BI_RGB
+    dim as ulong ptr p
+    dim as HBITMAP hbm = CreateDIBSection( null, @bi, DIB_RGB_COLORS, cast(any ptr ptr, @p), null, 0 )
+    if hbm andalso p then
+        for y as long = 0 to S - 1
+            for x as long = 0 to S - 1
+                dim as ulong c = &hFF3399EE
+                if (((x \ 8) + (y \ 8)) and 1) then c = &hFFEE9933
+                p[y * S + x] = c
+            next
+        next
+        dim as PsImage tmp
+        tmp.LoadFromBitmap( hbm )
+        if tmp.IsValid() then AfxGdipSaveImageToPng( tmp.Image()->m_pImage, wszPath )
+    end if
+    if hbm then DeleteObject( hbm )
+end sub
+
+
 ' ========================================================================================
 ' Build the main toolbar: every one of the six item kinds, both gravities, an overflow-able
 ' run, and a real child window in a CONTROL cell.
@@ -332,6 +361,12 @@ sub BuildMainToolbar( byval hTB as HWND, byval pWindow as CWindow ptr )
     PsToolbar_AddItem( hTB, TBR_KIND_COMMAND, !"\uE8A5", "New",  IDM_NEW )
     PsToolbar_AddItem( hTB, TBR_KIND_COMMAND, !"\uE8E5", "Open", IDM_OPEN )
     PsToolbar_AddItem( hTB, TBR_KIND_COMMAND, !"\uE74E", "Save", IDM_SAVE )
+
+    ' A REAL image item (a .png), in the same cell a glyph would occupy. sample_icon.png was
+    ' written in frmMain_Show before the toolbars were built.
+    idx = PsToolbar_AddItem( hTB, TBR_KIND_COMMAND, "", "Image", IDM_OPEN )
+    PsToolbar_SetItemImage( hTB, idx, "sample_icon.png" )
+    PsToolbar_SetTooltipText( hTB, idx, "A .png image icon" )
 
     PsToolbar_AddSeparator( hTB )
 
@@ -433,6 +468,10 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
         PsToolbar_SetControlNotifyCallback( hBars(i), @PsToolbar_ControlNotifyCallback )
     next
 
+    ' Write the sample .png once, before any toolbar loads it (a toolbar holding it open would
+    ' block a re-write).
+    MakeSampleIconFile( "sample_icon.png" )
+
     BuildMainToolbar( HWND_TOOLBAR_MAIN, pWindow )
     BuildCustomToolbar( HWND_TOOLBAR_CUSTOM, pWindow )
 
@@ -489,6 +528,14 @@ function frmMain_Show( byval hWndParent as HWND ) as LRESULT
     end if
 
     UpdateWindow( pWindow->hWindow )
+    ' A self-test run closes the window so the process exits and the suite can run
+    ' unattended. Without this the demo sits in its pump and the console output stays
+    ' BUFFERED -- killing the run then loses every line, the summary included.
+    if environ("PSTOOLBAR_SELFTEST") = "1" then
+        DestroyWindow( pWindow->hWindow )
+        return 0
+    end if
+
     ShowWindow( pWindow->hWindow, SW_SHOW )
 
     ' Screenshot hook: opens the Run split button's menu so a capture can show a dropdown

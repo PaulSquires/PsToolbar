@@ -3,6 +3,11 @@
 ''
 
 #include once "PsToolbar.bi"
+' The tooltip backend switch, pulled in here so a host needs no extra include line.
+#include once "PsTipHost.inc"
+' Image loader implementation, pulled in here so a host needs no extra include line
+' (#include once guards it if the host includes it too).
+#include once "PsImage.inc"
 
 
 ' Forward declarations for the private helpers that are used above their definitions.
@@ -46,29 +51,6 @@ private sub PsToolbar_InvalidateOverflow( byval pTB as PSTOOLBAR ptr )
 end sub
 
 
-private function PsToolbar_AddTooltip( byval hCtrl as HWND ) as HWND
-    if IsWindow(hCtrl) = 0 then return 0
-    dim as HWND hTooltip = CreateWindowExW( 0, "tooltips_class32", "", _
-                                            WS_POPUP or TTS_ALWAYSTIP, _
-                                            0, 0, 0, 0, NULL, NULL, NULL, NULL )
-    if hTooltip = 0 then return 0
-    SetWindowPos( hTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE or SWP_NOSIZE or SWP_NOACTIVATE )
-
-    dim tti as TOOLINFOW
-    ' cbSize must match the running comctl32 version (see AfxNova AfxAddTooltip).
-    #ifdef __FB_64BIT__
-        if AfxComCtlVersion < 600 then tti.cbSize = 64 else tti.cbSize = 72
-    #else
-        if AfxComCtlVersion < 600 then tti.cbSize = 44 else tti.cbSize = 48
-    #endif
-    tti.uFlags   = TTF_IDISHWND or TTF_SUBCLASS
-    tti.hwnd     = hCtrl
-    tti.uId      = cast(UINT_PTR, hCtrl)
-    tti.hinst    = GetModuleHandleW(NULL)
-    tti.lpszText = LPSTR_TEXTCALLBACK
-    SendMessageW( hTooltip, TTM_ADDTOOLW, 0, cast(LPARAM, @tti) )
-    return hTooltip
-end function
 
 
 ' Per-item text wins; the callback is consulted only for items with none. There is NO fall
@@ -80,6 +62,21 @@ private function PsToolbar_ResolveTooltipText( byval pTB as PSTOOLBAR ptr, byval
     if len( pTB->items(idx).wszTooltip ) then return pTB->items(idx).wszTooltip
     if pTB->TooltipCallback then return pTB->TooltipCallback( pTB->hWin, idx )
     return ""
+end function
+
+
+' ========================================================================================
+' Supply the tooltip text to the PsTooltip backend.
+'
+' This thunk is why PsTipHost never learns the text policy: PsToolbar_ResolveTooltipText
+' stays the ONE place that decides what a tip says, and the system backend reaches the
+' same function by the other road (comctl32 asking through TTN_GETDISPINFOW), which is
+' why that arm stays in the WndProc.
+' ========================================================================================
+private function PsToolbar_TipTextCallback( byval hTooltip as HWND, byval hAttached as HWND, _
+                                        byval idx as long ) as DWSTRING
+    dim as DWSTRING wszOut = PsToolbar_ResolveTooltipText( GetToolbarPointer(hAttached), idx )
+    return wszOut
 end function
 
 
@@ -655,8 +652,11 @@ private sub PsToolbar_PaintItemDefault( _
 
     b->SetColors( foreclr, backclr )
 
-    if len( p->wszGlyph ) then
-        if IsRectEmpty( @p->rcIcon ) = 0 then
+    ' Image first, else glyph. Both draw into the same declared icon cell (rcIcon).
+    if IsRectEmpty( @p->rcIcon ) = 0 then
+        if p->pImage then
+            b->PaintImage( p->pImage, @p->rcIcon, PS_IMGFIT_ASPECT )
+        elseif len( p->wszGlyph ) then
             b->SetFont( PsToolbar_ResolveGlyphFont( pTB ) )
             ' PaintText already adds DT_VCENTER / DT_SINGLELINE / DT_NOPREFIX.
             b->PaintText( p->wszGlyph, @p->rcIcon, DT_CENTER )
@@ -726,6 +726,7 @@ private sub PsToolbar_FillPaintInfo( _
         p->nMood        = PsToolbar_ResolveMood( true, false, pTB->bOverflowHot )
         p->wszGlyph     = ""
         p->wszText      = ""
+        p->pImage       = 0             ' the overflow button is always a chevron glyph
         exit sub
     end if
 
@@ -753,6 +754,7 @@ private sub PsToolbar_FillPaintInfo( _
         p->nMood      = PsToolbar_ResolveMood( .isEnabled, p->isPressed, p->isHot )
         p->wszGlyph   = .wszGlyph
         p->wszText    = .wszText
+        p->pImage     = iif( (.pImage <> 0) andalso (.pImage->IsValid() <> 0), .pImage->Image(), cast( CGpImage ptr, 0 ) )
     end with
 end sub
 
@@ -1069,7 +1071,12 @@ function PsToolbar_WndProc( _
                 ' Item changed: pop the current tip so it re-queries TTN_GETDISPINFOW for the
                 ' new item on the next hover.
                 if bItemChanged then
-                    if pTB->hToolTip then SendMessage( pTB->hToolTip, TTM_POP, 0, 0 )
+                    ' Item changed. On the system backend this pops the tip so it re-queries
+                    ' TTN_GETDISPINFOW for the new item; on PsTooltip it moves the tool index, which
+                    ' hides a visible tip and re-resolves on the next dwell. One call site either way --
+                    ' and the index is what lets the PsTooltip backend report WHICH item a tip is for,
+                    ' which comctl32 never knew.
+                    PsTipHost_SetToolIndex( @pTB->tip, idx )
                 end if
             end if
             m.idx   = idx
@@ -1260,12 +1267,14 @@ function PsToolbar_WndProc( _
             ' ...nor the capture, if we are being destroyed mid-press.
             if GetCapture() = hwnd then ReleaseCapture()
             pTB->CancelPress()
-            ' Every menu is ours; a host's CONTROL child is not, and is left alone.
+            ' Every menu is ours; a host's CONTROL child is not, and is left alone. Any
+            ' per-item image is ours too (raw pointer, not auto-freed by delete pTB).
             for i as long = 0 to pTB->itemCount - 1
                 if pTB->items(i).hMenu <> 0 then
                     if IsWindow( pTB->items(i).hMenu ) then DestroyWindow( pTB->items(i).hMenu )
                     pTB->items(i).hMenu = 0
                 end if
+                if pTB->items(i).pImage <> 0 then delete pTB->items(i).pImage : pTB->items(i).pImage = 0
             next
             if pTB->hOverflowMenu <> 0 then
                 if IsWindow( pTB->hOverflowMenu ) then DestroyWindow( pTB->hOverflowMenu )
@@ -1276,7 +1285,7 @@ function PsToolbar_WndProc( _
     case WM_NCDESTROY
         ' Delete the stored toolbar data pointer
         if pTB then
-            if IsWindow(pTB->hToolTip) then DestroyWindow(pTB->hToolTip)
+            PsTipHost_Destroy( @pTB->tip )
             delete(pTB)
         end if
 
@@ -1351,7 +1360,10 @@ function PsToolbar_Create( byval hWndParent as HWND, byval CtrlID as long ) as H
 
     SetWindowLongPtr( hCtrl, GWLP_ID, CtrlID )
     pWindow->UserData(0) = cast(LONG_PTR, pTB)
-    pTB->hToolTip = PsToolbar_AddTooltip( hCtrl )
+
+    ' AFTER UserData, not before: PsToolbar_TipTextCallback resolves the control through
+    ' GetToolbarPointer(hAttached), which reads exactly that slot.
+    PsTipHost_Ensure( @pTB->tip, hCtrl, @PsToolbar_TipTextCallback )
 
     function = hCtrl
 end function
@@ -1485,10 +1497,43 @@ function PsToolbar_SetGlyph( byval hToolbar as HWND, byval idx as long, byval Gl
     dim as PSTOOLBAR_ITEM ptr pItem = pTB->GetItem(idx)
     if pItem = null then return false
     pItem->wszGlyph = Glyph
+    ' Glyph OR image: setting an actual glyph frees any image on this item.
+    if (len( Glyph ) > 0) andalso (pItem->pImage <> 0) then
+        delete pItem->pImage : pItem->pImage = 0
+    end if
     ' Adding or removing a glyph changes whether the icon cell and the text gap are charged
     ' at all, so this is a LAYOUT change, not a repaint.
     pTB->Refresh()
     return true
+end function
+
+' ========================================================================================
+' Load an image into an item's icon cell, replacing its glyph. "" removes it. TRUE on a
+' successful load; on failure the empty image is dropped so nothing draws.
+' ========================================================================================
+function PsToolbar_SetItemImage( byval hToolbar as HWND, byval idx as long, byval Path as DWSTRING ) as boolean
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = null then return false
+    dim as PSTOOLBAR_ITEM ptr pItem = pTB->GetItem(idx)
+    if pItem = null then return false
+
+    if len( Path ) = 0 then
+        ' Removal SUCCEEDS. It used to return FALSE, which a caller could not tell apart from
+        ' a load that failed -- so "did that do what I asked" had no answer on this path.
+        if pItem->pImage then delete pItem->pImage : pItem->pImage = 0
+        pTB->Refresh()
+        return true
+    end if
+
+    if pItem->pImage = 0 then pItem->pImage = new PsImage
+    dim as long bOK = pItem->pImage->Load( Path )
+    if bOK = 0 then
+        delete pItem->pImage : pItem->pImage = 0
+    else
+        pItem->wszGlyph = ""                 ' glyph OR image
+    end if
+    pTB->Refresh()
+    return (bOK <> 0)
 end function
 
 function PsToolbar_GetText( byval hToolbar as HWND, byval idx as long ) as DWSTRING
@@ -2152,16 +2197,59 @@ function PsToolbar_SetTooltipText( byval hToolbar as HWND, byval idx as long, by
     return true
 end function
 
+' The comctl32 handle, and 0 while on PsTooltip -- the honest answer, since a TTM_* sent
+' to a PsTooltip window is silently ignored.
 function PsToolbar_GetTooltipHandle( byval hToolbar as HWND ) as HWND
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
     if pTB = null then return 0
-    return pTB->hToolTip
+    return PsTipHost_SysHandle( @pTB->tip )
 end function
 
+' The PsTooltip window, and 0 while on the system backend. This is the door to PsTooltip's
+' own SetColors/SetFonts/SetStyle/SetMaxWidth/SetTitle/SetGlyph, none of which is mirrored
+' on this control.
+function PsToolbar_GetPsTooltipHandle( byval hToolbar as HWND ) as HWND
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return 0
+    return PsTipHost_PsHandle( @pTB->tip )
+end function
+
+function PsToolbar_SetTooltipMode( byval hToolbar as HWND, byval nMode as long ) as boolean
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return false
+    return PsTipHost_SetMode( @pTB->tip, nMode )
+end function
+
+function PsToolbar_GetTooltipMode( byval hToolbar as HWND ) as long
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return PSTIP_MODE_SYSTEM
+    return PsTipHost_GetMode( @pTB->tip )
+end function
+
+' The three delays go through PsTipHost, which STORES them as well as pushing them, so a
+' hover time set before a mode switch is still in force after it. Pushing straight at the
+' live tooltip loses it at the switch -- and the tip still appears, just on a different
+' beat, with nothing reporting the change.
 sub PsToolbar_SetHoverTime( byval hToolbar as HWND, byval milliseconds as long )
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
-    if pTB = null then exit sub
-    if milliseconds > 0 then pTB->HoverTime = milliseconds
+    if pTB = 0 then exit sub
+    ' The field is STILL READ by TrackMouseEvent as dwHoverTime, so this setter
+    ' drives the hot-tracking dwell as well as the tooltip. Dropping it here would
+    ' silently change when the control considers itself hot.
+    pTB->HoverTime = milliseconds
+    PsTipHost_SetDelay( @pTB->tip, TTDT_INITIAL, milliseconds )
+end sub
+
+sub PsToolbar_SetAutoPopTime( byval hToolbar as HWND, byval milliseconds as long )
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then exit sub
+    PsTipHost_SetDelay( @pTB->tip, TTDT_AUTOPOP, milliseconds )
+end sub
+
+sub PsToolbar_SetReshowTime( byval hToolbar as HWND, byval milliseconds as long )
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then exit sub
+    PsTipHost_SetDelay( @pTB->tip, TTDT_RESHOW, milliseconds )
 end sub
 
 
@@ -3645,6 +3733,162 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
 
 
     ' ====================================================================================
+    ' PART L2 -- a real image in an icon cell.
+    '
+    ' The strong claim is the EQUIVALENCE: an image charges the exact same cell a glyph does,
+    ' proven by measuring both rather than trusting the cell-width formula. Multi-tone image on
+    ' purpose, or the render probe below could not tell it from a wiped cell.
+    ' ====================================================================================
+    scope
+        PsToolbar_Clear( h )
+        dim as wstring * 260 wszTmp = "__pstbr_st.png"
+        scope
+            dim as BITMAPINFO bi
+            bi.bmiHeader.biSize        = sizeof( BITMAPINFOHEADER )
+            bi.bmiHeader.biWidth       = 24
+            bi.bmiHeader.biHeight      = -24
+            bi.bmiHeader.biPlanes      = 1
+            bi.bmiHeader.biBitCount    = 32
+            bi.bmiHeader.biCompression = BI_RGB
+            dim as ulong ptr pB
+            dim as HBITMAP hbm = CreateDIBSection( null, @bi, DIB_RGB_COLORS, cast(any ptr ptr, @pB), null, 0 )
+            if hbm andalso pB then
+                for yy as long = 0 to 23
+                    for xx as long = 0 to 23
+                        dim as ulong c = &hFF3399EE
+                        if ((xx < 12) xor (yy < 12)) then c = &hFFEE9933
+                        pB[yy * 24 + xx] = c
+                    next
+                next
+                dim as PsImage tmp
+                tmp.LoadFromBitmap( hbm )
+                if tmp.IsValid() then AfxGdipSaveImageToPng( tmp.Image()->m_pImage, wszTmp )
+            end if
+            if hbm then DeleteObject( hbm )
+        end scope
+
+        ' A caption-only item (no icon cell) is the baseline.
+        dim as long q0 = PsToolbar_AddItem( h, TBR_KIND_COMMAND, "", "Img", 701 )
+        SetWindowPos( h, 0, 0, 0, 400, HH, SWP_NOZORDER or SWP_NOACTIVATE )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellNoIcon = pT->items(q0).nCellWidth
+
+        ' Cell width with a glyph.
+        PsToolbar_SetGlyph( h, q0, "A" )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellGlyph = pT->items(q0).nCellWidth
+
+        ' Cell width with an image (which also clears the glyph -- either/or).
+        dim as boolean okImg = PsToolbar_SetItemImage( h, q0, wszTmp )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellImg = pT->items(q0).nCellWidth
+
+        TBRTest_Check( "SetItemImage loads the file", okImg, "returned " & str(okImg) )
+        sD = "noIcon=" & str(cellNoIcon) & " glyph=" & str(cellGlyph) & " image=" & str(cellImg)
+        TBRTest_Check( "an image reserves an icon cell (cell grows)", (cellImg > cellNoIcon), sD )
+        TBRTest_Check( "an image charges the SAME cell a glyph does", (cellImg = cellGlyph), sD )
+
+        dim as wstring * 8 wg = PsToolbar_GetGlyph( h, q0 )
+        TBRTest_Check( "setting an image clears the item glyph", (len(wg) = 0), "glyph=[" & str(wg) & "]" )
+
+        ' Render: the image reached the icon cell.
+        SetWindowPos( h, 0, 0, 0, 400, HH, SWP_NOZORDER or SWP_NOACTIVATE )
+        dim as long tImg = PsToolbar_CountRenderedTones( h, TBR_PART_ICON, q0 )
+        TBRTest_Check( "the image draws ink into the icon cell", (tImg >= 4), "icon tones=" & str(tImg) )
+
+        ' Removing the image reclaims the cell exactly -- and REPORTS SUCCESS. That second
+        ' half is asserted because the return used to be FALSE here, identical to what a
+        ' failed load returns, so a caller had no way to tell the two apart. Failure is
+        ' asserted alongside it, or "always returns true" would pass just as well.
+        dim as boolean bRemoved = PsToolbar_SetItemImage( h, q0, "" )
+        TBRTest_Check( "removing an image reports SUCCESS, not the failure code", _
+            bRemoved, "empty-path removal returned " & str(bRemoved) )
+        dim as boolean bBadLoad = PsToolbar_SetItemImage( h, q0, "Z:\no\such\file.png" )
+        TBRTest_Check( "...while a load that cannot decode still reports failure", _
+            (bBadLoad = false), "bad path returned " & str(bBadLoad) )
+        dim as boolean bBadIdx = PsToolbar_SetItemImage( h, 9999, "" )
+        TBRTest_Check( "...and so does a bad index", _
+            (bBadIdx = false), "bad index returned " & str(bBadIdx) )
+        PsToolbar_GetIdealSize( h, iw, ih )
+        dim as long cellRemoved = pT->items(q0).nCellWidth
+        TBRTest_Check( "removing the image reclaims the icon cell", (cellRemoved = cellNoIcon), _
+                       "now=" & str(cellRemoved) & " base=" & str(cellNoIcon) )
+
+        PsToolbar_Clear( h )
+        DeleteFileW( wszTmp )
+    end scope
+
+
+    ' ====================================================================================
+
+    ' ====================================================================================
+    ' TOOLTIP BACKEND -- mode, handles, the delays surviving a switch, and the text wiring
+    '
+    ' A real dwell is what would exercise this end to end and no self-test can produce one,
+    ' so what is asserted is the WIRING. The text assertion in particular resolves through
+    ' the callback the tip actually holds rather than by calling our own thunk: on the pilot
+    ' the direct-call version stayed green with the wiring deleted, which would have shipped
+    ' a control that shows no tooltip at all once switched.
+    ' ====================================================================================
+    scope
+        dim as HWND hTipT = PsToolbar_Create( hWndParent, 9807 )
+        if hTipT = 0 then
+            TBRTest_Check( "tooltip: could not create a test control", false, "Create returned 0" )
+        else
+            TBRTest_Check( "tooltip: still ships on the SYSTEM backend", _
+                (PsToolbar_GetTooltipMode( hTipT ) = PSTIP_MODE_SYSTEM), _
+                "mode = " & str(PsToolbar_GetTooltipMode( hTipT )) )
+            TBRTest_Check( "tooltip: a comctl32 window exists, and no PsTooltip does", _
+                (PsToolbar_GetTooltipHandle( hTipT ) <> 0) andalso _
+                (IsWindow(PsToolbar_GetTooltipHandle( hTipT )) <> 0) andalso _
+                (PsToolbar_GetPsTooltipHandle( hTipT ) = 0), _
+                "hSys = " & str(cast(integer, PsToolbar_GetTooltipHandle( hTipT ))) )
+
+            PsToolbar_SetHoverTime( hTipT, 777 )
+            TBRTest_Check( "tooltip: SetHoverTime reaches the comctl32 tip", _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 ) = 777), _
+                "TTM_GETDELAYTIME = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 )) & " ms" )
+
+            dim as HWND hSysBeforeT = PsToolbar_GetTooltipHandle( hTipT )
+            ' The switch is made on its own line, NOT inside the assertion call. fbc does not
+            ' evaluate call arguments left to right, so a detail string that reads the mode in
+            ' the same call reports the mode from BEFORE the switch -- a green assertion with a
+            ' trace saying it failed, which is worse than either.
+            dim as boolean bSwitchedT = PsToolbar_SetTooltipMode( hTipT, PSTIP_MODE_PS )
+            TBRTest_Check( "tooltip: switching to PsTooltip succeeds", bSwitchedT, _
+                "mode = " & str(PsToolbar_GetTooltipMode( hTipT )) )
+            TBRTest_Check( "tooltip: the outgoing comctl32 window is DESTROYED, not orphaned", _
+                (IsWindow(hSysBeforeT) = 0) andalso (PsToolbar_GetTooltipHandle( hTipT ) = 0), _
+                "old hSys alive = " & str(IsWindow(hSysBeforeT)) )
+
+            dim as HWND hPsT = PsToolbar_GetPsTooltipHandle( hTipT )
+            TBRTest_Check( "tooltip: a PsTooltip window exists and is attached to the control", _
+                (hPsT <> 0) andalso (IsWindow(hPsT) <> 0) andalso _
+                (PsTooltip_GetAttached( hPsT ) = hTipT), _
+                "hPs = " & str(cast(integer, hPsT)) )
+
+            dim as PSTOOLTIP ptr pTipT = GetTooltipPointer( hPsT )
+            TBRTest_Check( "tooltip: the hover time set on the OLD backend is honoured by the new one", _
+                (pTipT <> 0) andalso (pTipT->nInitialDelay = 777), _
+                "PsTooltip initial delay = " & str(iif(pTipT, pTipT->nInitialDelay, -1)) & " ms" )
+            TBRTest_Check( "tooltip: the PsTooltip backend is WIRED to the control's text policy", _
+                (pTipT <> 0) andalso (pTipT->TooltipCallback <> 0), _
+                "callback installed = " & str(iif(pTipT andalso pTipT->TooltipCallback, 1, 0)) )
+
+            PsToolbar_SetTooltipMode( hTipT, PSTIP_MODE_SYSTEM )
+            TBRTest_Check( "tooltip: switching back rebuilds the comctl32 tip, hover time and all", _
+                (PsToolbar_GetTooltipHandle( hTipT ) <> 0) andalso _
+                (PsToolbar_GetPsTooltipHandle( hTipT ) = 0) andalso _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 ) = 777), _
+                "initial = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 )) & " ms" )
+            TBRTest_Check( "tooltip: an unset delay is left at the backend's own default", _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_AUTOPOP, 0 ) > 0), _
+                "autopop = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_AUTOPOP, 0 )) & " ms" )
+
+            DestroyWindow( hTipT )
+        end if
+    end scope
+
     if environ("PSTOOLBAR_TRACE") = "1" then
         print "--- trace: final layout ---"
         SetWindowPos( h, 0, 0, 0, W, HH, SWP_NOZORDER or SWP_NOACTIVATE )
