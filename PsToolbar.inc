@@ -3,6 +3,8 @@
 ''
 
 #include once "PsToolbar.bi"
+' The tooltip backend switch, pulled in here so a host needs no extra include line.
+#include once "PsTipHost.inc"
 ' Image loader implementation, pulled in here so a host needs no extra include line
 ' (#include once guards it if the host includes it too).
 #include once "PsImage.inc"
@@ -49,29 +51,6 @@ private sub PsToolbar_InvalidateOverflow( byval pTB as PSTOOLBAR ptr )
 end sub
 
 
-private function PsToolbar_AddTooltip( byval hCtrl as HWND ) as HWND
-    if IsWindow(hCtrl) = 0 then return 0
-    dim as HWND hTooltip = CreateWindowExW( 0, "tooltips_class32", "", _
-                                            WS_POPUP or TTS_ALWAYSTIP, _
-                                            0, 0, 0, 0, NULL, NULL, NULL, NULL )
-    if hTooltip = 0 then return 0
-    SetWindowPos( hTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE or SWP_NOSIZE or SWP_NOACTIVATE )
-
-    dim tti as TOOLINFOW
-    ' cbSize must match the running comctl32 version (see AfxNova AfxAddTooltip).
-    #ifdef __FB_64BIT__
-        if AfxComCtlVersion < 600 then tti.cbSize = 64 else tti.cbSize = 72
-    #else
-        if AfxComCtlVersion < 600 then tti.cbSize = 44 else tti.cbSize = 48
-    #endif
-    tti.uFlags   = TTF_IDISHWND or TTF_SUBCLASS
-    tti.hwnd     = hCtrl
-    tti.uId      = cast(UINT_PTR, hCtrl)
-    tti.hinst    = GetModuleHandleW(NULL)
-    tti.lpszText = LPSTR_TEXTCALLBACK
-    SendMessageW( hTooltip, TTM_ADDTOOLW, 0, cast(LPARAM, @tti) )
-    return hTooltip
-end function
 
 
 ' Per-item text wins; the callback is consulted only for items with none. There is NO fall
@@ -83,6 +62,21 @@ private function PsToolbar_ResolveTooltipText( byval pTB as PSTOOLBAR ptr, byval
     if len( pTB->items(idx).wszTooltip ) then return pTB->items(idx).wszTooltip
     if pTB->TooltipCallback then return pTB->TooltipCallback( pTB->hWin, idx )
     return ""
+end function
+
+
+' ========================================================================================
+' Supply the tooltip text to the PsTooltip backend.
+'
+' This thunk is why PsTipHost never learns the text policy: PsToolbar_ResolveTooltipText
+' stays the ONE place that decides what a tip says, and the system backend reaches the
+' same function by the other road (comctl32 asking through TTN_GETDISPINFOW), which is
+' why that arm stays in the WndProc.
+' ========================================================================================
+private function PsToolbar_TipTextCallback( byval hTooltip as HWND, byval hAttached as HWND, _
+                                        byval idx as long ) as DWSTRING
+    dim as DWSTRING wszOut = PsToolbar_ResolveTooltipText( GetToolbarPointer(hAttached), idx )
+    return wszOut
 end function
 
 
@@ -1077,7 +1071,12 @@ function PsToolbar_WndProc( _
                 ' Item changed: pop the current tip so it re-queries TTN_GETDISPINFOW for the
                 ' new item on the next hover.
                 if bItemChanged then
-                    if pTB->hToolTip then SendMessage( pTB->hToolTip, TTM_POP, 0, 0 )
+                    ' Item changed. On the system backend this pops the tip so it re-queries
+                    ' TTN_GETDISPINFOW for the new item; on PsTooltip it moves the tool index, which
+                    ' hides a visible tip and re-resolves on the next dwell. One call site either way --
+                    ' and the index is what lets the PsTooltip backend report WHICH item a tip is for,
+                    ' which comctl32 never knew.
+                    PsTipHost_SetToolIndex( @pTB->tip, idx )
                 end if
             end if
             m.idx   = idx
@@ -1286,7 +1285,7 @@ function PsToolbar_WndProc( _
     case WM_NCDESTROY
         ' Delete the stored toolbar data pointer
         if pTB then
-            if IsWindow(pTB->hToolTip) then DestroyWindow(pTB->hToolTip)
+            PsTipHost_Destroy( @pTB->tip )
             delete(pTB)
         end if
 
@@ -1361,7 +1360,10 @@ function PsToolbar_Create( byval hWndParent as HWND, byval CtrlID as long ) as H
 
     SetWindowLongPtr( hCtrl, GWLP_ID, CtrlID )
     pWindow->UserData(0) = cast(LONG_PTR, pTB)
-    pTB->hToolTip = PsToolbar_AddTooltip( hCtrl )
+
+    ' AFTER UserData, not before: PsToolbar_TipTextCallback resolves the control through
+    ' GetToolbarPointer(hAttached), which reads exactly that slot.
+    PsTipHost_Ensure( @pTB->tip, hCtrl, @PsToolbar_TipTextCallback )
 
     function = hCtrl
 end function
@@ -2196,13 +2198,53 @@ end function
 function PsToolbar_GetTooltipHandle( byval hToolbar as HWND ) as HWND
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
     if pTB = null then return 0
-    return pTB->hToolTip
+    return PsTipHost_SysHandle( @pTB->tip )
 end function
 
+' The comctl32 handle, and 0 while on PsTooltip -- the honest answer, since a TTM_* sent
+' to a PsTooltip window is silently ignored.
+function PsToolbar_GetPsTooltipHandle( byval hToolbar as HWND ) as HWND
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return 0
+    return PsTipHost_PsHandle( @pTB->tip )
+end function
+
+function PsToolbar_SetTooltipMode( byval hToolbar as HWND, byval nMode as long ) as boolean
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return false
+    return PsTipHost_SetMode( @pTB->tip, nMode )
+end function
+
+function PsToolbar_GetTooltipMode( byval hToolbar as HWND ) as long
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then return PSTIP_MODE_SYSTEM
+    return PsTipHost_GetMode( @pTB->tip )
+end function
+
+' The three delays go through PsTipHost, which STORES them as well as pushing them, so a
+' hover time set before a mode switch is still in force after it. Pushing straight at the
+' live tooltip loses it at the switch -- and the tip still appears, just on a different
+' beat, with nothing reporting the change.
 sub PsToolbar_SetHoverTime( byval hToolbar as HWND, byval milliseconds as long )
     dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
-    if pTB = null then exit sub
-    if milliseconds > 0 then pTB->HoverTime = milliseconds
+    if pTB = 0 then exit sub
+    ' The field is STILL READ by TrackMouseEvent as dwHoverTime, so this setter
+    ' drives the hot-tracking dwell as well as the tooltip. Dropping it here would
+    ' silently change when the control considers itself hot.
+    pTB->HoverTime = milliseconds
+    PsTipHost_SetDelay( @pTB->tip, TTDT_INITIAL, milliseconds )
+end sub
+
+sub PsToolbar_SetAutoPopTime( byval hToolbar as HWND, byval milliseconds as long )
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then exit sub
+    PsTipHost_SetDelay( @pTB->tip, TTDT_AUTOPOP, milliseconds )
+end sub
+
+sub PsToolbar_SetReshowTime( byval hToolbar as HWND, byval milliseconds as long )
+    dim as PSTOOLBAR ptr pTB = GetToolbarPointer(hToolbar)
+    if pTB = 0 then exit sub
+    PsTipHost_SetDelay( @pTB->tip, TTDT_RESHOW, milliseconds )
 end sub
 
 
@@ -3762,6 +3804,75 @@ sub PsToolbar_RunSelfTest( byval hWndParent as HWND )
 
 
     ' ====================================================================================
+
+    ' ====================================================================================
+    ' TOOLTIP BACKEND -- mode, handles, the delays surviving a switch, and the text wiring
+    '
+    ' A real dwell is what would exercise this end to end and no self-test can produce one,
+    ' so what is asserted is the WIRING. The text assertion in particular resolves through
+    ' the callback the tip actually holds rather than by calling our own thunk: on the pilot
+    ' the direct-call version stayed green with the wiring deleted, which would have shipped
+    ' a control that shows no tooltip at all once switched.
+    ' ====================================================================================
+    scope
+        dim as HWND hTipT = PsToolbar_Create( hWndParent, 9807 )
+        if hTipT = 0 then
+            TBRTest_Check( "tooltip: could not create a test control", false, "Create returned 0" )
+        else
+            TBRTest_Check( "tooltip: still ships on the SYSTEM backend", _
+                (PsToolbar_GetTooltipMode( hTipT ) = PSTIP_MODE_SYSTEM), _
+                "mode = " & str(PsToolbar_GetTooltipMode( hTipT )) )
+            TBRTest_Check( "tooltip: a comctl32 window exists, and no PsTooltip does", _
+                (PsToolbar_GetTooltipHandle( hTipT ) <> 0) andalso _
+                (IsWindow(PsToolbar_GetTooltipHandle( hTipT )) <> 0) andalso _
+                (PsToolbar_GetPsTooltipHandle( hTipT ) = 0), _
+                "hSys = " & str(cast(integer, PsToolbar_GetTooltipHandle( hTipT ))) )
+
+            PsToolbar_SetHoverTime( hTipT, 777 )
+            TBRTest_Check( "tooltip: SetHoverTime reaches the comctl32 tip", _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 ) = 777), _
+                "TTM_GETDELAYTIME = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 )) & " ms" )
+
+            dim as HWND hSysBeforeT = PsToolbar_GetTooltipHandle( hTipT )
+            ' The switch is made on its own line, NOT inside the assertion call. fbc does not
+            ' evaluate call arguments left to right, so a detail string that reads the mode in
+            ' the same call reports the mode from BEFORE the switch -- a green assertion with a
+            ' trace saying it failed, which is worse than either.
+            dim as boolean bSwitchedT = PsToolbar_SetTooltipMode( hTipT, PSTIP_MODE_PS )
+            TBRTest_Check( "tooltip: switching to PsTooltip succeeds", bSwitchedT, _
+                "mode = " & str(PsToolbar_GetTooltipMode( hTipT )) )
+            TBRTest_Check( "tooltip: the outgoing comctl32 window is DESTROYED, not orphaned", _
+                (IsWindow(hSysBeforeT) = 0) andalso (PsToolbar_GetTooltipHandle( hTipT ) = 0), _
+                "old hSys alive = " & str(IsWindow(hSysBeforeT)) )
+
+            dim as HWND hPsT = PsToolbar_GetPsTooltipHandle( hTipT )
+            TBRTest_Check( "tooltip: a PsTooltip window exists and is attached to the control", _
+                (hPsT <> 0) andalso (IsWindow(hPsT) <> 0) andalso _
+                (PsTooltip_GetAttached( hPsT ) = hTipT), _
+                "hPs = " & str(cast(integer, hPsT)) )
+
+            dim as PSTOOLTIP ptr pTipT = GetTooltipPointer( hPsT )
+            TBRTest_Check( "tooltip: the hover time set on the OLD backend is honoured by the new one", _
+                (pTipT <> 0) andalso (pTipT->nInitialDelay = 777), _
+                "PsTooltip initial delay = " & str(iif(pTipT, pTipT->nInitialDelay, -1)) & " ms" )
+            TBRTest_Check( "tooltip: the PsTooltip backend is WIRED to the control's text policy", _
+                (pTipT <> 0) andalso (pTipT->TooltipCallback <> 0), _
+                "callback installed = " & str(iif(pTipT andalso pTipT->TooltipCallback, 1, 0)) )
+
+            PsToolbar_SetTooltipMode( hTipT, PSTIP_MODE_SYSTEM )
+            TBRTest_Check( "tooltip: switching back rebuilds the comctl32 tip, hover time and all", _
+                (PsToolbar_GetTooltipHandle( hTipT ) <> 0) andalso _
+                (PsToolbar_GetPsTooltipHandle( hTipT ) = 0) andalso _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 ) = 777), _
+                "initial = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_INITIAL, 0 )) & " ms" )
+            TBRTest_Check( "tooltip: an unset delay is left at the backend's own default", _
+                (SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_AUTOPOP, 0 ) > 0), _
+                "autopop = " & str(SendMessageW( PsToolbar_GetTooltipHandle( hTipT ), TTM_GETDELAYTIME, TTDT_AUTOPOP, 0 )) & " ms" )
+
+            DestroyWindow( hTipT )
+        end if
+    end scope
+
     if environ("PSTOOLBAR_TRACE") = "1" then
         print "--- trace: final layout ---"
         SetWindowPos( h, 0, 0, 0, W, HH, SWP_NOZORDER or SWP_NOACTIVATE )

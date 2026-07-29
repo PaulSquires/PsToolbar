@@ -22,6 +22,9 @@
 ' An item can show a real image file (.ico/.png/.bmp/.jpg) instead of a Fluent glyph.
 ' PsImage owns the decode; PsBufferPaint.PaintImage draws it. See PsToolbar_SetItemImage.
 #include once "PsImage.bi"
+' The tooltip backend switch. The control ships on the SYSTEM (comctl32) backend exactly
+' as it always has; a host opts an instance into PsTooltip with PsToolbar_SetTooltipMode.
+#include once "PsTipHost.bi"
 
 
 ' Polling timer that guarantees hot-tracking is cleared when the mouse leaves the control.
@@ -412,7 +415,10 @@ declare function PsToolbar_ResolveMood( _
 ' ========================================================================================
 type PSTOOLBAR
     hWin               as HWND
-    hToolTip           as HWND
+    ' The tooltip, whichever backend it is on. Replaces the old hToolTip + HoverTime
+    ' pair; PsToolbar_GetTooltipHandle still answers the comctl32 handle, and 0 while
+    ' this instance is on PsTooltip.
+    tip          as PSTIPHOST
     wszTooltip         as DWSTRING
     items(any)         as PSTOOLBAR_ITEM
     itemCount          as long = 0
@@ -1478,6 +1484,16 @@ declare function PsToolbar_GetTooltipText( byval hToolbar as HWND, byval idx as 
 declare function PsToolbar_SetTooltipText( byval hToolbar as HWND, byval idx as long, byval Text as DWSTRING ) as boolean
 declare function PsToolbar_GetTooltipHandle( byval hToolbar as HWND ) as HWND
 declare sub      PsToolbar_SetHoverTime( byval hToolbar as HWND, byval milliseconds as long )
+declare function PsToolbar_SetTooltipMode( byval hToolbar as HWND, byval nMode as long ) as boolean
+declare function PsToolbar_GetTooltipMode( byval hToolbar as HWND ) as long
+' The PsTooltip window, or 0 on the system backend. The door to PsTooltip's own
+' SetColors/SetFonts/SetStyle/SetMaxWidth/SetTitle/SetGlyph -- deliberately not mirrored
+' here, since thirteen controls x twenty setters is 260 wrappers to keep in step.
+declare function PsToolbar_GetPsTooltipHandle( byval hToolbar as HWND ) as HWND
+' Honoured by BOTH backends. A delay never set keeps the backend's own derivation from
+' the system double-click time.
+declare sub      PsToolbar_SetAutoPopTime( byval hToolbar as HWND, byval milliseconds as long )
+declare sub      PsToolbar_SetReshowTime( byval hToolbar as HWND, byval milliseconds as long )
 
 ' ----------------------------------------------------------------------------------------
 ' Callbacks.  See the type declarations above for each signature and contract.
